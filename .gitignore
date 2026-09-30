@@ -1,0 +1,17 @@
+node_modules
+data
+vm-data
+dist
+.DS_Store
+
+.env
+.env.*
+!.env.example
+
+debug-*.cjs
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3

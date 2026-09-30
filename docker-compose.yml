@@ -1,0 +1,47 @@
+# XMonitor — 独立部署，不占用本机已有服务端口
+# 已占用（勿用）: 3001 / 5173 / 17493 / 7890 / 7891 / 9090
+# 本栈对外: 8790；VictoriaMetrics 仅容器网内 8428（宿主机可映射到 127.0.0.1:8428 便于排查）
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.110.0
+    container_name: xmonitor-vm
+    restart: unless-stopped
+    command:
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-retentionPeriod=30d"
+      - "-httpListenAddr=:8428"
+      - "-memory.allowedBytes=512MB"
+    mem_limit: 768m
+    volumes:
+      - ./vm-data:/victoria-metrics-data
+    ports:
+      - "127.0.0.1:8428:8428"
+    # 不走宿主机代理，避免内网指标写入被劫持
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      NO_PROXY: "*"
+
+  xmonitor:
+    image: xmonitor:0.1.0
+    build: .
+    container_name: xmonitor
+    restart: unless-stopped
+    depends_on:
+      - victoriametrics
+    ports:
+      - "8790:8790"
+    environment:
+      PORT: "8790"
+      XMONITOR_OBSCURA_ENDPOINT: "http://127.0.0.1:9222"
+      XMONITOR_VM_URL: "http://victoriametrics:8428"
+      # 需要代理访问外网时，在同目录 .env 里设置（该文件不会入库）
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,victoriametrics,xmonitor-vm}
+    volumes:
+      - ./data:/app/data
+      - ./vm-data:/app/vm-data:ro
+    shm_size: "256mb"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
