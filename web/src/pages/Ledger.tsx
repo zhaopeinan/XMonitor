@@ -477,11 +477,11 @@ export default function Ledger() {
                       <td className="whitespace-nowrap px-3 py-3.5">
                         {isTruthy(e.domain_applied) && e.domain ? (
                           <a
-                            href={`http://${e.domain}`}
+                            href={`https://${e.domain}`}
                             target="_blank"
                             rel="noreferrer"
                             className="font-mono text-xs text-indigo-600 hover:underline"
-                            title="在新标签打开"
+                            title="在新标签以 https 打开"
                           >
                             {e.domain}
                           </a>
