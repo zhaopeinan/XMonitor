@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api } from '../api';
 import { useConfirm } from '../components/ConfirmDialog';
 import { ROLE_LABELS, useAuth, type UserRole } from '../auth';
@@ -8,6 +8,9 @@ import { errMsg, fmtDateTime, fmtRelative, isTruthy } from '../utils';
 
 const inputCls =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 placeholder-slate-400 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200';
+
+/** 离视口边缘至少留出的间距，避免下拉贴边 */
+const MENU_VIEWPORT_GAP = 8;
 
 const ROLE_META: Record<
   UserRole,
@@ -184,7 +187,15 @@ export default function Users() {
   const [resetPass, setResetPass] = useState('');
   const [resetConfirm, setResetConfirm] = useState('');
   const [pendingIds, setPendingIds] = useState<Set<number>>(new Set());
-  const [menuId, setMenuId] = useState<number | null>(null);
+  /** 账号行的「管理」下拉：固定定位渲染，避免被列表卡片的 overflow-hidden 裁掉 */
+  const [menu, setMenu] = useState<{
+    id: number;
+    top?: number;
+    bottom?: number;
+    right: number;
+    /** 按钮上边缘（视口坐标），供上翻时对齐按钮上方 */
+    anchorTop: number;
+  } | null>(null);
 
   const [permDefs, setPermDefs] = useState<PermDef[]>([]);
   const [rolePerms, setRolePerms] = useState<Record<string, string[]>>({});
@@ -226,6 +237,49 @@ export default function Users() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** 打开/收起账号行的「管理」下拉：先贴在按钮下方，渲染后再按实际高度校正 */
+  const toggleMenu = (id: number, el: HTMLButtonElement) => {
+    if (menu?.id === id) {
+      setMenu(null);
+      return;
+    }
+    const r = el.getBoundingClientRect();
+    setMenu({
+      id,
+      top: r.bottom + 4,
+      right: Math.max(MENU_VIEWPORT_GAP, window.innerWidth - r.right),
+      anchorTop: r.top,
+    });
+  };
+
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  // 下拉是固定定位：渲染后量一次实际高度（在绘制前完成，不会闪），
+  // 下方放不下就翻到按钮上方，上下都放不下则贴住视口底部
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!menu || !el || menu.bottom != null) return;
+    const r = el.getBoundingClientRect();
+    if (r.bottom <= window.innerHeight - MENU_VIEWPORT_GAP) return;
+    if (menu.anchorTop - 4 - r.height >= MENU_VIEWPORT_GAP) {
+      setMenu({ ...menu, top: undefined, bottom: window.innerHeight - menu.anchorTop + 4 });
+    } else {
+      setMenu({ ...menu, top: Math.max(MENU_VIEWPORT_GAP, window.innerHeight - r.height - MENU_VIEWPORT_GAP) });
+    }
+  }, [menu]);
+
+  // 下拉是固定定位，滚动或缩放后会与按钮脱节，直接收起
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [menu]);
 
   const AUDIT_PAGE = 50;
 
@@ -364,7 +418,7 @@ export default function Users() {
     if (!ok) return;
     markPending(u.id, true);
     setError(null);
-    setMenuId(null);
+    setMenu(null);
     try {
       const res = await api.updateUser(u.id, { role });
       setUsers(res.users);
@@ -404,7 +458,7 @@ export default function Users() {
 
   const remove = async (u: UserItem) => {
     if (pendingIds.has(u.id)) return;
-    setMenuId(null);
+    setMenu(null);
     if (
       !(await confirm({
         title: '删除用户',
@@ -431,7 +485,7 @@ export default function Users() {
   const toggleDisabled = async (u: UserItem) => {
     if (pendingIds.has(u.id)) return;
     const next = !isTruthy(u.disabled);
-    setMenuId(null);
+    setMenu(null);
     if (
       !(await confirm({
         title: next ? '停用账号' : '启用账号',
@@ -739,15 +793,19 @@ export default function Users() {
                         <button
                           type="button"
                           disabled={busy}
-                          onClick={() => setMenuId((id) => (id === u.id ? null : u.id))}
+                          onClick={(e) => toggleMenu(u.id, e.currentTarget)}
                           className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
                         >
                           管理
                         </button>
-                        {menuId === u.id && (
+                        {menu?.id === u.id && (
                           <>
-                            <div className="fixed inset-0 z-10" onClick={() => setMenuId(null)} />
-                            <div className="absolute right-0 z-20 mt-1 w-52 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
+                            <div className="fixed inset-0 z-10" onClick={() => setMenu(null)} />
+                            <div
+                              ref={menuRef}
+                              className="fixed z-20 w-52 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
+                              style={{ top: menu.top, bottom: menu.bottom, right: menu.right }}
+                            >
                               {roleLocked && (
                                 <p className="border-b border-slate-100 bg-slate-50 px-3 py-2 text-[11px] leading-relaxed text-slate-500">
                                   管理员账号仅管理员可管理
@@ -795,7 +853,7 @@ export default function Users() {
                                 disabled={roleLocked}
                                 title={roleLocked ? '仅管理员可以修改管理员账号' : undefined}
                                 onClick={() => {
-                                  setMenuId(null);
+                                  setMenu(null);
                                   setResetUser(u);
                                   setResetPass('');
                                   setResetConfirm('');
