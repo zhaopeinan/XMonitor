@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api } from '../api';
 import { useConfirm } from '../components/ConfirmDialog';
 import { ROLE_LABELS, useAuth, type UserRole } from '../auth';
 import { Card, ErrorBanner, PageHeader, Spinner } from '../components/ui';
-import type { UserItem } from '../types';
-import { errMsg, fmtDateTime } from '../utils';
+import type { AuditLogItem, AuditLogPayload, SessionItem, UserItem } from '../types';
+import { errMsg, fmtDateTime, fmtRelative, isTruthy } from '../utils';
 
 const inputCls =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 placeholder-slate-400 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200';
@@ -39,7 +39,59 @@ interface PermDef {
   desc: string;
 }
 
-type TabKey = 'accounts' | 'rbac';
+type TabKey = 'accounts' | 'rbac' | 'sessions' | 'audit';
+
+/** 审计动作的展示样式：危险动作红色、成功/登录绿色、普通改动靛蓝 */
+const AUDIT_META: Record<string, { label: string; cls: string }> = {
+  login: { label: '登录成功', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  login_failed: { label: '登录失败', cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+  logout: { label: '退出登录', cls: 'bg-slate-100 text-slate-600 border-slate-200' },
+  password_change: { label: '修改本人密码', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
+  'user.create': { label: '新建账号', cls: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+  'user.role': { label: '变更角色', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
+  'user.password_reset': { label: '重置密码', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
+  'user.disable': { label: '停用账号', cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+  'user.enable': { label: '启用账号', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  'user.delete': { label: '删除账号', cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+  'session.revoke': { label: '强制下线', cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+  'session.revoke_user': { label: '踢出全部会话', cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+  'role.permissions': { label: '更新角色权限', cls: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+};
+
+function auditMeta(action: string): { label: string; cls: string } {
+  return AUDIT_META[action] ?? { label: action, cls: 'bg-slate-100 text-slate-600 border-slate-200' };
+}
+
+/** 把 User-Agent 折成一句话，原始串放到 title 里 */
+function describeUa(ua: string): string {
+  if (!ua) return '未知客户端';
+  const os = /Windows NT/i.test(ua)
+    ? 'Windows'
+    : /Mac OS X|Macintosh/i.test(ua)
+      ? 'macOS'
+      : /Android/i.test(ua)
+        ? 'Android'
+        : /iPhone|iPad|iOS/i.test(ua)
+          ? 'iOS'
+          : /Linux/i.test(ua)
+            ? 'Linux'
+            : '';
+  const browser = /Edg\//i.test(ua)
+    ? 'Edge'
+    : /OPR\//i.test(ua)
+      ? 'Opera'
+      : /Chrome\//i.test(ua)
+        ? 'Chrome'
+        : /Safari\//i.test(ua)
+          ? 'Safari'
+          : /Firefox\//i.test(ua)
+            ? 'Firefox'
+            : '';
+  const parts = [browser, os].filter(Boolean);
+  if (parts.length) return parts.join(' · ');
+  if (/curl|wget|python|node|go-http/i.test(ua)) return '脚本 / 命令行';
+  return ua.slice(0, 24);
+}
 
 function Modal({
   title,
@@ -113,6 +165,9 @@ function samePerms(a: Record<string, string[]>, b: Record<string, string[]>): bo
 export default function Users() {
   const { user: me } = useAuth();
   const confirm = useConfirm();
+  const isAdminActor = me?.role === 'admin';
+  /** 管理员账号只允许管理员操作；服务端会再校验一次 */
+  const adminLocked = (role: string) => role === 'admin' && !isAdminActor;
   const [tab, setTab] = useState<TabKey>('accounts');
   const [users, setUsers] = useState<UserItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -136,6 +191,20 @@ export default function Users() {
   const [savedPerms, setSavedPerms] = useState<Record<string, string[]>>({});
   const [permSaving, setPermSaving] = useState(false);
 
+  // 在线会话
+  const [sessions, setSessions] = useState<SessionItem[] | null>(null);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [revokingIds, setRevokingIds] = useState<Set<string>>(new Set());
+
+  // 审计日志
+  const [auditLogs, setAuditLogs] = useState<AuditLogItem[] | null>(null);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditActions, setAuditActions] = useState<Record<string, string>>({});
+  const [auditQ, setAuditQ] = useState('');
+  const [auditAction, setAuditAction] = useState('');
+  const [auditLoading, setAuditLoading] = useState(false);
+  const auditLogsRef = useRef<AuditLogItem[]>([]);
+
   const dirty = useMemo(() => !samePerms(rolePerms, savedPerms), [rolePerms, savedPerms]);
 
   const load = useCallback(async () => {
@@ -158,6 +227,55 @@ export default function Users() {
     void load();
   }, [load]);
 
+  const AUDIT_PAGE = 50;
+
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    try {
+      const res = await api.getSessions();
+      setSessions(res.sessions);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, []);
+
+  const loadAudit = useCallback(
+    async (append = false) => {
+      setAuditLoading(true);
+      try {
+        const res = await api.getAuditLogs({
+          limit: AUDIT_PAGE,
+          offset: append ? auditLogsRef.current.length : 0,
+          q: auditQ.trim() || undefined,
+          action: auditAction || undefined,
+        });
+        const next = append ? [...auditLogsRef.current, ...res.logs] : res.logs;
+        auditLogsRef.current = next;
+        setAuditLogs(next);
+        setAuditTotal(res.total);
+        setAuditActions(res.actions);
+      } catch (e) {
+        setError(errMsg(e));
+      } finally {
+        setAuditLoading(false);
+      }
+    },
+    [auditQ, auditAction],
+  );
+
+  useEffect(() => {
+    if (tab === 'sessions') void loadSessions();
+  }, [tab, loadSessions]);
+
+  // 关键字输入加一点防抖，避免每敲一个字就查一次
+  useEffect(() => {
+    if (tab !== 'audit') return;
+    const t = setTimeout(() => void loadAudit(), auditQ ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [tab, auditQ, auditAction, loadAudit]);
+
   useEffect(() => {
     if (!notice) return;
     const t = setTimeout(() => setNotice(null), 4000);
@@ -176,17 +294,29 @@ export default function Users() {
     if (!users) return null;
     const q = query.trim().toLowerCase();
     if (!q) return users;
-    return users.filter((u) => u.username.toLowerCase().includes(q) || (ROLE_LABELS[u.role as UserRole] ?? u.role).includes(q));
+    return users.filter((u) => {
+      const roleLabel = ROLE_LABELS[u.role as UserRole] ?? u.role;
+      const stateLabel = isTruthy(u.disabled) ? '已停用' : '启用中';
+      return u.username.toLowerCase().includes(q) || roleLabel.includes(q) || stateLabel.includes(q);
+    });
   }, [users, query]);
 
   const counts = useMemo(() => {
-    const c = { admin: 0, operator: 0, viewer: 0, total: 0 };
+    const c = { admin: 0, operator: 0, viewer: 0, disabled: 0, total: 0 };
     for (const u of users ?? []) {
       c.total += 1;
       if (u.role === 'admin' || u.role === 'operator' || u.role === 'viewer') c[u.role] += 1;
+      if (isTruthy(u.disabled)) c.disabled += 1;
     }
     return c;
   }, [users]);
+
+  /** 每个账号当前的会话数，用于决定是否显示「该账号全部下线」 */
+  const sessionCountByUser = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const s of sessions ?? []) m.set(s.user_id, (m.get(s.user_id) ?? 0) + 1);
+    return m;
+  }, [sessions]);
 
   const openCreate = () => {
     setNewName('');
@@ -204,6 +334,10 @@ export default function Users() {
     }
     if (newPass.length < 6) {
       setError('密码至少 6 位');
+      return;
+    }
+    if (newRole === 'admin' && !isAdminActor) {
+      setError('仅管理员可以创建管理员账号');
       return;
     }
     setCreating(true);
@@ -293,6 +427,93 @@ export default function Users() {
     }
   };
 
+  /** 停用/启用账号：停用会连同已有会话一起踢下线 */
+  const toggleDisabled = async (u: UserItem) => {
+    if (pendingIds.has(u.id)) return;
+    const next = !isTruthy(u.disabled);
+    setMenuId(null);
+    if (
+      !(await confirm({
+        title: next ? '停用账号' : '启用账号',
+        message: next
+          ? `停用「${u.username}」？\n\n该账号将无法登录，已登录的会话立即失效（被踢下线）。账号与历史记录保留，随时可重新启用。`
+          : `启用「${u.username}」？\n\n启用后该账号恢复登录能力，需要本人重新登录。`,
+        confirmText: next ? '停用并踢下线' : '启用',
+        danger: next,
+      }))
+    )
+      return;
+    markPending(u.id, true);
+    setError(null);
+    try {
+      const res = await api.updateUser(u.id, { disabled: next });
+      setUsers(res.users);
+      setNotice(next ? `已停用「${u.username}」并踢下线` : `已启用「${u.username}」`);
+      if (sessions) void loadSessions();
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      markPending(u.id, false);
+    }
+  };
+
+  const markRevoking = (id: string, on: boolean) =>
+    setRevokingIds((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+
+  /** 强制下线单个会话 */
+  const revokeSession = async (s: SessionItem) => {
+    if (revokingIds.has(s.id)) return;
+    if (
+      !(await confirm({
+        title: '强制下线',
+        message: `让「${s.username}」的这个会话立即失效？\n\n${describeUa(s.user_agent)}${s.ip ? ` · ${s.ip}` : ''}\n登录于 ${fmtDateTime(s.created_at)}\n\n对方需要重新登录才能继续使用。`,
+        confirmText: '强制下线',
+        danger: true,
+      }))
+    )
+      return;
+    markRevoking(s.id, true);
+    setError(null);
+    try {
+      const res = await api.revokeSession(s.id);
+      setSessions(res.sessions);
+      setNotice(`已踢出「${s.username}」的一个会话`);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      markRevoking(s.id, false);
+    }
+  };
+
+  /** 踢出某账号的全部会话；对自己操作时保留当前会话，等价于「其他设备下线」 */
+  const revokeAllOfUser = async (s: SessionItem) => {
+    const mine = s.user_id === me?.id;
+    if (
+      !(await confirm({
+        title: mine ? '其他设备下线' : '踢出全部会话',
+        message: mine
+          ? '让本账号在其他设备/浏览器上的会话全部失效？当前这个会话会保留。'
+          : `让「${s.username}」的所有会话立即失效？\n\n对方会被立刻登出，需要重新登录。`,
+        confirmText: mine ? '其他设备下线' : '全部踢出',
+        danger: true,
+      }))
+    )
+      return;
+    setError(null);
+    try {
+      const res = await api.revokeUserSessions(s.user_id);
+      setSessions(res.sessions);
+      setNotice(mine ? `已踢出其他设备上的 ${res.revoked} 个会话` : `已踢出「${s.username}」的 ${res.revoked} 个会话`);
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  };
+
   const togglePerm = (role: 'operator' | 'viewer', key: string) => {
     setRolePerms((prev) => {
       const cur = new Set(prev[role] ?? []);
@@ -369,7 +590,7 @@ export default function Users() {
             >
               新建用户
             </button>
-          ) : (
+          ) : tab === 'rbac' ? (
             <div className="flex items-center gap-2">
               {dirty && (
                 <button
@@ -390,6 +611,16 @@ export default function Users() {
                 {dirty ? '保存权限' : '已是最新'}
               </button>
             </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => (tab === 'sessions' ? void loadSessions() : void loadAudit())}
+              disabled={tab === 'sessions' ? sessionsLoading : auditLoading}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+            >
+              {(tab === 'sessions' ? sessionsLoading : auditLoading) && <Spinner />}
+              刷新
+            </button>
           )
         }
       />
@@ -399,6 +630,8 @@ export default function Users() {
           [
             { key: 'accounts' as const, label: '账号', hint: `${counts.total} 人` },
             { key: 'rbac' as const, label: '角色权限', hint: dirty ? '有未保存' : 'RBAC' },
+            { key: 'sessions' as const, label: '在线会话', hint: sessions ? `${sessions.length} 个` : '会话' },
+            { key: 'audit' as const, label: '审计日志', hint: auditLogs ? `${auditTotal} 条` : '记录' },
           ] as const
         ).map((t) => (
           <button
@@ -430,7 +663,7 @@ export default function Users() {
 
       {tab === 'accounts' && (
         <>
-          <div className="mb-4 grid grid-cols-3 gap-3">
+          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
             {(['admin', 'operator', 'viewer'] as UserRole[]).map((role) => (
               <div key={role} className={`rounded-xl border border-slate-200 px-4 py-3 ${ROLE_META[role].soft}`}>
                 <div className="flex items-center justify-between">
@@ -440,6 +673,19 @@ export default function Users() {
                 <p className="mt-2 text-[11px] leading-relaxed text-slate-500">{ROLE_META[role].desc}</p>
               </div>
             ))}
+            <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+              <div className="flex items-center justify-between">
+                <span
+                  className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${
+                    counts.disabled ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-100 text-slate-500'
+                  }`}
+                >
+                  已停用
+                </span>
+                <span className="text-lg font-semibold tabular-nums text-slate-900">{counts.disabled}</span>
+              </div>
+              <p className="mt-2 text-[11px] leading-relaxed text-slate-500">停用后不可登录，已登录会话立即失效；账号与记录保留</p>
+            </div>
           </div>
 
           <Card className="overflow-hidden">
@@ -465,18 +711,26 @@ export default function Users() {
                 {filtered.map((u) => {
                   const isMe = me?.id === u.id;
                   const busy = pendingIds.has(u.id);
+                  const roleLocked = adminLocked(u.role);
                   return (
                     <li key={u.id} className="relative flex items-center gap-4 px-5 py-4">
                       <Avatar name={u.username} />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium text-slate-900">{u.username}</span>
+                          <span className={`font-medium ${isTruthy(u.disabled) ? 'text-slate-400 line-through' : 'text-slate-900'}`}>
+                            {u.username}
+                          </span>
                           {isMe && (
                             <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
                               当前登录
                             </span>
                           )}
                           <RoleBadge role={u.role} />
+                          {isTruthy(u.disabled) && (
+                            <span className="rounded-full border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-600">
+                              已停用
+                            </span>
+                          )}
                         </div>
                         <p className="mt-0.5 text-xs text-slate-400">创建于 {fmtDateTime(u.created_at)}</p>
                       </div>
@@ -493,25 +747,53 @@ export default function Users() {
                         {menuId === u.id && (
                           <>
                             <div className="fixed inset-0 z-10" onClick={() => setMenuId(null)} />
-                            <div className="absolute right-0 z-20 mt-1 w-48 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
+                            <div className="absolute right-0 z-20 mt-1 w-52 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
+                              {roleLocked && (
+                                <p className="border-b border-slate-100 bg-slate-50 px-3 py-2 text-[11px] leading-relaxed text-slate-500">
+                                  管理员账号仅管理员可管理
+                                </p>
+                              )}
                               <p className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">
                                 变更角色
                               </p>
-                              {(['viewer', 'operator', 'admin'] as UserRole[]).map((role) => (
-                                <button
-                                  key={role}
-                                  type="button"
-                                  disabled={isMe || u.role === role}
-                                  onClick={() => void changeRole(u, role)}
-                                  className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"
-                                >
-                                  {ROLE_LABELS[role]}
-                                  {u.role === role && <span className="text-xs text-emerald-600">当前</span>}
-                                </button>
-                              ))}
+                              {(['viewer', 'operator', 'admin'] as UserRole[]).map((role) => {
+                                const blocked = roleLocked || (role === 'admin' && !isAdminActor);
+                                return (
+                                  <button
+                                    key={role}
+                                    type="button"
+                                    disabled={isMe || u.role === role || blocked}
+                                    title={
+                                      roleLocked
+                                        ? '仅管理员可以修改管理员账号'
+                                        : role === 'admin' && !isAdminActor
+                                          ? '仅管理员可以授予管理员角色'
+                                          : undefined
+                                    }
+                                    onClick={() => void changeRole(u, role)}
+                                    className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+                                  >
+                                    {ROLE_LABELS[role]}
+                                    {u.role === role && <span className="text-xs text-emerald-600">当前</span>}
+                                  </button>
+                                );
+                              })}
                               <div className="my-1 border-t border-slate-100" />
+                              {!isMe && (
+                                <button
+                                  type="button"
+                                  disabled={roleLocked}
+                                  title={roleLocked ? '仅管理员可以修改管理员账号' : undefined}
+                                  onClick={() => void toggleDisabled(u)}
+                                  className="block w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+                                >
+                                  {isTruthy(u.disabled) ? '启用账号' : '停用账号'}
+                                </button>
+                              )}
                               <button
                                 type="button"
+                                disabled={roleLocked}
+                                title={roleLocked ? '仅管理员可以修改管理员账号' : undefined}
                                 onClick={() => {
                                   setMenuId(null);
                                   setResetUser(u);
@@ -519,15 +801,17 @@ export default function Users() {
                                   setResetConfirm('');
                                   setError(null);
                                 }}
-                                className="block w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+                                className="block w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"
                               >
                                 重置密码
                               </button>
                               {!isMe && (
                                 <button
                                   type="button"
+                                  disabled={roleLocked}
+                                  title={roleLocked ? '仅管理员可以删除管理员账号' : undefined}
                                   onClick={() => void remove(u)}
-                                  className="block w-full px-3 py-2 text-left text-sm text-rose-600 hover:bg-rose-50"
+                                  className="block w-full px-3 py-2 text-left text-sm text-rose-600 hover:bg-rose-50 disabled:opacity-40"
                                 >
                                   删除账号
                                 </button>
@@ -671,6 +955,204 @@ export default function Users() {
         </div>
       )}
 
+      {tab === 'sessions' && (
+        <div className="space-y-4">
+          <p className="rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-xs leading-relaxed text-slate-500">
+            会话默认 7 天到期。停用账号、重置密码、删除账号都会自动踢下线；这里可以手动让某个会话立即失效。服务端不会把会话凭证下发到浏览器，只显示摘要 id。
+          </p>
+          {!sessions ? (
+            <Card className="flex items-center justify-center gap-2 py-12 text-sm text-slate-400">
+              <Spinner /> 加载中…
+            </Card>
+          ) : sessions.length === 0 ? (
+            <Card className="px-5 py-12 text-center text-sm text-slate-400">当前没有在线会话</Card>
+          ) : (
+            <Card className="overflow-hidden">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-3.5">
+                <h3 className="text-sm font-semibold text-slate-900">在线会话</h3>
+                <span className="text-xs text-slate-400">
+                  {sessions.length} 个会话 · {new Set(sessions.map((s) => s.user_id)).size} 个账号
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[820px] text-sm">
+                  <thead>
+                    <tr className="whitespace-nowrap border-b border-slate-100 bg-slate-50/80 text-left text-xs text-slate-400">
+                      <th className="px-5 py-3 font-medium">账号</th>
+                      <th className="px-3 py-3 font-medium">来源</th>
+                      <th className="px-3 py-3 font-medium">登录时间</th>
+                      <th className="px-3 py-3 font-medium">最近活跃</th>
+                      <th className="px-3 py-3 font-medium">到期时间</th>
+                      <th className="w-44 px-5 py-3 text-right font-medium">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sessions.map((s) => {
+                      const busy = revokingIds.has(s.id);
+                      const count = sessionCountByUser.get(s.user_id) ?? 1;
+                      const sessionLocked = adminLocked(s.role);
+                      return (
+                        <tr key={s.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
+                          <td className="whitespace-nowrap px-5 py-3.5">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium text-slate-900">{s.username}</span>
+                              <RoleBadge role={s.role} />
+                              {s.current && (
+                                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
+                                  当前会话
+                                </span>
+                              )}
+                              {isTruthy(s.disabled) && (
+                                <span className="rounded-full border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-600">
+                                  已停用
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-3.5">
+                            <div className="text-xs text-slate-600" title={s.user_agent}>
+                              {describeUa(s.user_agent)}
+                            </div>
+                            <div className="font-mono text-[11px] text-slate-400">{s.ip || '未知 IP'}</div>
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-3.5 text-xs text-slate-500">{fmtDateTime(s.created_at)}</td>
+                          <td className="whitespace-nowrap px-3 py-3.5 text-xs text-slate-500">
+                            {s.last_seen_at ? fmtRelative(s.last_seen_at) : '—'}
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-3.5 text-xs text-slate-500">{fmtDateTime(s.expires_at)}</td>
+                          <td className="whitespace-nowrap px-5 py-3.5 text-right">
+                            <div className="inline-flex items-center gap-2">
+                              {!s.current && (
+                                <button
+                                  type="button"
+                                  disabled={busy || sessionLocked}
+                                  title={sessionLocked ? '仅管理员可以操作管理员的会话' : undefined}
+                                  onClick={() => void revokeSession(s)}
+                                  className="rounded-lg border border-rose-200 px-2.5 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-40"
+                                >
+                                  强制下线
+                                </button>
+                              )}
+                              {count > 1 && (
+                                <button
+                                  type="button"
+                                  disabled={busy || sessionLocked}
+                                  title={sessionLocked ? '仅管理员可以操作管理员的会话' : undefined}
+                                  onClick={() => void revokeAllOfUser(s)}
+                                  className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                                >
+                                  {s.user_id === me?.id ? '其他设备下线' : '该账号全部下线'}
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {tab === 'audit' && (
+        <Card className="overflow-hidden">
+          <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-5 py-3.5">
+            <h3 className="text-sm font-semibold text-slate-900">审计日志</h3>
+            <span className="text-xs text-slate-400">共 {auditTotal} 条</span>
+            <div className="ml-auto flex flex-wrap items-center gap-2">
+              <select
+                className={`${inputCls} !w-44 !py-1.5`}
+                value={auditAction}
+                onChange={(e) => setAuditAction(e.target.value)}
+              >
+                <option value="">全部动作</option>
+                {Object.entries(auditActions).map(([key, label]) => (
+                  <option key={key} value={key}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <input
+                className={`${inputCls} w-56 !py-1.5`}
+                placeholder="搜索操作人 / 对象 / 详情…"
+                value={auditQ}
+                onChange={(e) => setAuditQ(e.target.value)}
+              />
+            </div>
+          </div>
+
+          {!auditLogs ? (
+            <div className="flex items-center justify-center gap-2 py-12 text-sm text-slate-400">
+              <Spinner /> 加载中…
+            </div>
+          ) : auditLogs.length === 0 ? (
+            <div className="px-5 py-12 text-center text-sm text-slate-400">
+              {auditQ || auditAction ? '没有匹配的记录' : '暂无审计记录'}
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[900px] text-sm">
+                  <thead>
+                    <tr className="whitespace-nowrap border-b border-slate-100 bg-slate-50/80 text-left text-xs text-slate-400">
+                      <th className="px-5 py-3 font-medium">时间</th>
+                      <th className="px-3 py-3 font-medium">动作</th>
+                      <th className="px-3 py-3 font-medium">操作人</th>
+                      <th className="px-3 py-3 font-medium">对象</th>
+                      <th className="px-3 py-3 font-medium">详情</th>
+                      <th className="px-5 py-3 font-medium">来源 IP</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditLogs.map((log) => {
+                      const meta = auditMeta(log.action);
+                      return (
+                        <tr key={log.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
+                          <td className="whitespace-nowrap px-5 py-3.5 text-xs text-slate-500">{fmtDateTime(log.ts)}</td>
+                          <td className="whitespace-nowrap px-3 py-3.5">
+                            <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${meta.cls}`}>
+                              {meta.label}
+                            </span>
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-3.5 text-slate-700">{log.actor_name || '—'}</td>
+                          <td className="whitespace-nowrap px-3 py-3.5 text-slate-700">{log.target || '—'}</td>
+                          <td className="max-w-[22rem] px-3 py-3.5">
+                            {log.detail ? (
+                              <span className="block truncate text-slate-500" title={log.detail}>
+                                {log.detail}
+                              </span>
+                            ) : (
+                              <span className="text-slate-300">—</span>
+                            )}
+                          </td>
+                          <td className="whitespace-nowrap px-5 py-3.5 font-mono text-[11px] text-slate-400">{log.ip || '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {auditLogs.length < auditTotal && (
+                <div className="border-t border-slate-100 px-5 py-3 text-center">
+                  <button
+                    type="button"
+                    disabled={auditLoading}
+                    onClick={() => void loadAudit(true)}
+                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    {auditLoading && <Spinner />}
+                    加载更多（已显示 {auditLogs.length} / {auditTotal}）
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </Card>
+      )}
+
       {createOpen && (
         <Modal
           title="新建用户"
@@ -720,30 +1202,36 @@ export default function Users() {
           </Field>
           <Field label="角色">
             <div className="space-y-2">
-              {(['viewer', 'operator', 'admin'] as UserRole[]).map((role) => (
-                <button
-                  key={role}
-                  type="button"
-                  onClick={() => setNewRole(role)}
-                  className={`flex w-full items-start gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors ${
-                    newRole === role
-                      ? 'border-slate-900 bg-slate-50 ring-1 ring-slate-900'
-                      : 'border-slate-200 hover:border-slate-300'
-                  }`}
-                >
-                  <span
-                    className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
-                      newRole === role ? 'border-slate-900 bg-slate-900' : 'border-slate-300'
+              {(['viewer', 'operator', 'admin'] as UserRole[]).map((role) => {
+                const blocked = role === 'admin' && !isAdminActor;
+                return (
+                  <button
+                    key={role}
+                    type="button"
+                    disabled={blocked}
+                    title={blocked ? '仅管理员可以创建管理员账号' : undefined}
+                    onClick={() => setNewRole(role)}
+                    className={`flex w-full items-start gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                      newRole === role
+                        ? 'border-slate-900 bg-slate-50 ring-1 ring-slate-900'
+                        : 'border-slate-200 hover:border-slate-300'
                     }`}
                   >
-                    {newRole === role && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
-                  </span>
-                  <span>
-                    <span className="block text-sm font-medium text-slate-900">{ROLE_LABELS[role]}</span>
-                    <span className="mt-0.5 block text-xs text-slate-500">{ROLE_META[role].desc}</span>
-                  </span>
-                </button>
-              ))}
+                    <span
+                      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                        newRole === role ? 'border-slate-900 bg-slate-900' : 'border-slate-300'
+                      }`}
+                    >
+                      {newRole === role && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                    </span>
+                    <span>
+                      <span className="block text-sm font-medium text-slate-900">{ROLE_LABELS[role]}</span>
+                      <span className="mt-0.5 block text-xs text-slate-500">{ROLE_META[role].desc}</span>
+                      {blocked && <span className="mt-0.5 block text-xs text-amber-600">只有管理员能创建管理员</span>}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </Field>
         </Modal>

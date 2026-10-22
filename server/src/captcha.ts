@@ -98,10 +98,16 @@ interface FailState {
 
 const fails = new Map<string, FailState>();
 
+/** 双栈监听时 Node 会把 IPv4 客户端报成 ::ffff:127.0.0.1，入库/展示前还原成 127.0.0.1 */
+function normalizeIp(ip: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  return mapped ? mapped[1]! : ip;
+}
+
 export function clientIp(req: { headers: Record<string, unknown>; socket?: { remoteAddress?: string } }): string {
   const xf = req.headers['x-forwarded-for'];
-  if (typeof xf === 'string' && xf.trim()) return xf.split(',')[0]!.trim();
-  return req.socket?.remoteAddress ?? 'unknown';
+  if (typeof xf === 'string' && xf.trim()) return normalizeIp(xf.split(',')[0]!.trim());
+  return normalizeIp(req.socket?.remoteAddress ?? 'unknown');
 }
 
 export function assertNotLocked(ip: string): { ok: true } | { ok: false; retryAfterSec: number } {

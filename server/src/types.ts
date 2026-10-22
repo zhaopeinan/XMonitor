@@ -37,6 +37,8 @@ export interface UserRow {
   username: string;
   password_hash: string;
   role: UserRole;
+  /** 1=已停用，停用后不可登录、已有会话立即失效 */
+  disabled: number;
   created_at: number;
 }
 

@@ -1,6 +1,8 @@
 import type {
   AlertsResponse,
+  AuditLogPayload,
   UserItem,
+  SessionItem,
   AnalysisResult,
   CheckRecord,
   DashboardData,
@@ -255,9 +257,24 @@ export const api = {
   getUsers: () => request<{ users: UserItem[] }>('/api/users'),
   createUser: (body: { username: string; password: string; role: string }) =>
     post<{ users: UserItem[] }>('/api/users', body),
-  updateUser: (id: number, patch: { role?: string; password?: string }) =>
+  updateUser: (id: number, patch: { role?: string; password?: string; disabled?: boolean }) =>
     request<{ users: UserItem[] }>(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteUser: (id: number) => request<{ users: UserItem[] }>(`/api/users/${id}`, { method: 'DELETE' }),
+
+  getSessions: () => request<{ sessions: SessionItem[] }>('/api/sessions'),
+  revokeSession: (id: string) =>
+    request<{ sessions: SessionItem[] }>(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  revokeUserSessions: (userId: number) =>
+    request<{ sessions: SessionItem[]; revoked: number }>(`/api/users/${userId}/sessions`, { method: 'DELETE' }),
+  getAuditLogs: (params: { limit?: number; offset?: number; q?: string; action?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit !== undefined) qs.set('limit', String(params.limit));
+    if (params.offset !== undefined) qs.set('offset', String(params.offset));
+    if (params.q) qs.set('q', params.q);
+    if (params.action) qs.set('action', params.action);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<AuditLogPayload>(`/api/audit-logs${suffix}`);
+  },
 
   getRolePermissions: () =>
     request<{

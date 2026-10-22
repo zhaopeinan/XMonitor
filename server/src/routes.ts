@@ -38,17 +38,30 @@ import {
   createUser,
   deleteUser,
   destroySession,
+  getUserBrief,
+  getSessionUser,
+  listSessions,
   listUsers,
   login,
   requireAdminRole,
   requireAuth,
   requirePermission,
+  revokeSessionById,
+  revokeUserSessions,
+  sessionIdOf,
   tokenFromRequest,
   updateUser,
 } from './users';
+import { AUDIT_ACTION_LABELS, listAuditLogs, recordAudit } from './audit';
 import type { SystemRow, UserRole } from './types';
 
 export const apiRouter = Router();
+
+/** 登录接口记录来源 IP 与客户端，供「在线会话」展示 */
+function userAgentOf(req: { headers: Record<string, unknown> }): string {
+  const ua = req.headers['user-agent'];
+  return typeof ua === 'string' ? ua.slice(0, 300) : '';
+}
 
 // ---- 认证（登录/验证码公开，其余 /api 均需登录） ----
 apiRouter.get('/auth/captcha', (_req, res) => {
@@ -74,13 +87,30 @@ apiRouter.post('/auth/login', (req, res) => {
     return res.status(400).json({ error: '验证码错误或已过期' });
   }
 
-  const user = login(username, password);
-  if (!user) {
-    recordLoginFailure(ip);
-    return res.status(401).json({ error: '用户名或密码错误' });
+  const outcome = login(username, password);
+  if (!outcome.ok) {
+    if (outcome.countFailure) recordLoginFailure(ip);
+    recordAudit({
+      actorId: outcome.actorId ?? null,
+      actorName: username,
+      action: 'login_failed',
+      target: username,
+      detail: outcome.error,
+      ip,
+    });
+    return res.status(401).json({ error: outcome.error });
   }
+  const user = outcome.user;
   clearLoginFailures(ip);
-  const { token, expiresAt } = createSession(user.id);
+  const { token, expiresAt } = createSession(user.id, ip, userAgentOf(req));
+  recordAudit({
+    actorId: user.id,
+    actorName: user.username,
+    action: 'login',
+    target: user.username,
+    detail: `角色：${ROLE_LABELS[user.role] ?? user.role}`,
+    ip,
+  });
   res.setHeader(
     'Set-Cookie',
     `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor((expiresAt - Date.now()) / 1000)}`,
@@ -91,7 +121,19 @@ apiRouter.post('/auth/login', (req, res) => {
 
 apiRouter.post('/auth/logout', (req, res) => {
   const token = tokenFromRequest(req);
-  if (token) destroySession(token);
+  if (token) {
+    const user = getSessionUser(token);
+    if (user) {
+      recordAudit({
+        actorId: user.id,
+        actorName: user.username,
+        action: 'logout',
+        target: user.username,
+        ip: clientIp(req),
+      });
+    }
+    destroySession(token);
+  }
   res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
   res.json({ ok: true });
 });
@@ -109,6 +151,14 @@ apiRouter.post('/auth/change-password', requireAuth, (req, res) => {
   const newPassword = typeof req.body?.new_password === 'string' ? req.body.new_password : '';
   const result = changeOwnPassword(req.user!.id, oldPassword, newPassword);
   if (!result.ok) return res.status(400).json({ error: result.error });
+  recordAudit({
+    actorId: req.user!.id,
+    actorName: req.user!.username,
+    action: 'password_change',
+    target: req.user!.username,
+    detail: '所有会话已失效，需重新登录',
+    ip: clientIp(req),
+  });
   // 改密后所有会话已清除，当前会话也失效，要求重新登录
   res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
   res.json({ ok: true });
@@ -123,25 +173,115 @@ apiRouter.post('/users', requirePermission('users.manage'), (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   const role = typeof req.body?.role === 'string' ? req.body.role : 'viewer';
-  const result = createUser(username, password, role);
+  const result = createUser(username, password, role, req.user!.role);
   if (!result.ok) return res.status(400).json({ error: result.error });
+  recordAudit({
+    actorId: req.user!.id,
+    actorName: req.user!.username,
+    action: 'user.create',
+    target: username,
+    detail: `角色：${ROLE_LABELS[role as UserRole] ?? role}`,
+    ip: clientIp(req),
+  });
   res.status(201).json({ users: listUsers() });
 });
 
 apiRouter.patch('/users/:id', requirePermission('users.manage'), (req, res) => {
   const id = Number(req.params.id);
-  const patch: { role?: string; password?: string } = {};
+  const patch: { role?: string; password?: string; disabled?: boolean } = {};
   if (typeof req.body?.role === 'string') patch.role = req.body.role;
   if (typeof req.body?.password === 'string' && req.body.password) patch.password = req.body.password;
+  if (typeof req.body?.disabled === 'boolean') patch.disabled = req.body.disabled;
+  const target = getUserBrief(id);
   const result = updateUser(id, patch, req.user!.id);
   if (!result.ok) return res.status(400).json({ error: result.error });
+  const actor = { actorId: req.user!.id, actorName: req.user!.username, ip: clientIp(req) };
+  const name = target?.username ?? `#${id}`;
+  if (patch.role !== undefined) {
+    recordAudit({ ...actor, action: 'user.role', target: name, detail: `→ ${ROLE_LABELS[patch.role as UserRole] ?? patch.role}` });
+  }
+  if (patch.password !== undefined) {
+    recordAudit({ ...actor, action: 'user.password_reset', target: name, detail: '会话已全部失效' });
+  }
+  if (patch.disabled !== undefined) {
+    recordAudit({
+      ...actor,
+      action: patch.disabled ? 'user.disable' : 'user.enable',
+      target: name,
+      detail: patch.disabled ? '已踢下线' : '',
+    });
+  }
   res.json({ users: listUsers() });
 });
 
 apiRouter.delete('/users/:id', requirePermission('users.manage'), (req, res) => {
-  const result = deleteUser(Number(req.params.id), req.user!.id);
+  const id = Number(req.params.id);
+  const target = getUserBrief(id);
+  const result = deleteUser(id, req.user!.id);
   if (!result.ok) return res.status(400).json({ error: result.error });
+  recordAudit({
+    actorId: req.user!.id,
+    actorName: req.user!.username,
+    action: 'user.delete',
+    target: target?.username ?? `#${id}`,
+    detail: target ? `原角色：${ROLE_LABELS[target.role] ?? target.role}` : '',
+    ip: clientIp(req),
+  });
   res.json({ users: listUsers() });
+});
+
+// ---- 在线会话：查看与强制下线 ----
+apiRouter.get('/sessions', requirePermission('users.manage'), (req, res) => {
+  res.json({ sessions: listSessions(tokenFromRequest(req)) });
+});
+
+apiRouter.delete('/sessions/:id', requirePermission('users.manage'), (req, res) => {
+  const current = tokenFromRequest(req);
+  if (current && req.params.id === sessionIdOf(current)) {
+    return res.status(400).json({ error: '不能踢出当前登录的会话，如需退出请用「退出登录」' });
+  }
+  const result = revokeSessionById(String(req.params.id), req.user!.role);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  recordAudit({
+    actorId: req.user!.id,
+    actorName: req.user!.username,
+    action: 'session.revoke',
+    target: result.username,
+    detail: result.ip ? `来源 ${result.ip}` : '',
+    ip: clientIp(req),
+  });
+  res.json({ sessions: listSessions(current) });
+});
+
+apiRouter.delete('/users/:id/sessions', requirePermission('users.manage'), (req, res) => {
+  const id = Number(req.params.id);
+  const target = getUserBrief(id);
+  if (!target) return res.status(400).json({ error: '用户不存在' });
+  if (target.role === 'admin' && req.user!.role !== 'admin') {
+    return res.status(400).json({ error: '仅管理员可以操作管理员的会话' });
+  }
+  const current = tokenFromRequest(req);
+  // 踢自己时保留当前会话，等价于「其他设备下线」
+  const keepCurrent = id === req.user!.id ? current : null;
+  const revoked = revokeUserSessions(id, keepCurrent);
+  recordAudit({
+    actorId: req.user!.id,
+    actorName: req.user!.username,
+    action: 'session.revoke_user',
+    target: target.username,
+    detail: `下线 ${revoked} 个会话${keepCurrent ? '（保留当前会话）' : ''}`,
+    ip: clientIp(req),
+  });
+  res.json({ sessions: listSessions(current), revoked });
+});
+
+// ---- 审计日志 ----
+apiRouter.get('/audit-logs', requirePermission('users.manage'), (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const action = typeof req.query.action === 'string' ? req.query.action.trim() : '';
+  res.json({ ...listAuditLogs({ limit, offset, q, action }), actions: AUDIT_ACTION_LABELS });
 });
 
 // ---- 角色权限配置 ----
@@ -161,7 +301,29 @@ apiRouter.put('/roles/permissions', requirePermission('users.manage'), (req, res
     if (!Array.isArray(list)) continue;
     patch[role] = list.filter((p: unknown): p is Permission => typeof p === 'string' && (ALL_PERMISSIONS as string[]).includes(p));
   }
+  const before = getRolePermissions();
   const role_permissions = setRolePermissions(patch);
+  const labelOf = (key: string) => PERMISSION_DEFS.find((p) => p.key === key)?.label ?? key;
+  const diff: string[] = [];
+  for (const role of ['operator', 'viewer'] as UserRole[]) {
+    if (!patch[role]) continue;
+    const prev = new Set(before[role] ?? []);
+    const next = new Set(role_permissions[role] ?? []);
+    const added = [...next].filter((k) => !prev.has(k)).map(labelOf);
+    const removed = [...prev].filter((k) => !next.has(k)).map(labelOf);
+    const parts: string[] = [];
+    if (added.length) parts.push(`新增「${added.join('、')}」`);
+    if (removed.length) parts.push(`移除「${removed.join('、')}」`);
+    diff.push(`${ROLE_LABELS[role]}：${parts.length ? parts.join('，') : '无变化'}`);
+  }
+  recordAudit({
+    actorId: req.user!.id,
+    actorName: req.user!.username,
+    action: 'role.permissions',
+    target: '角色权限矩阵',
+    detail: diff.join('；'),
+    ip: clientIp(req),
+  });
   res.json({
     permissions: PERMISSION_DEFS,
     roles: ROLE_LABELS,

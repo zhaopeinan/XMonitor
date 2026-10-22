@@ -160,12 +160,28 @@ CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL,
+  ip TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER
+);
+-- 身份与权限审计：登录、账号变更、角色权限、会话强制下线
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  actor_id INTEGER,
+  actor_name TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL,
+  target TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  ip TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_system_ledgers_system ON system_ledgers(system_id);
 CREATE INDEX IF NOT EXISTS idx_checks_monitor_ts ON checks(monitor_id, ts);
 CREATE INDEX IF NOT EXISTS idx_alerts_monitor_ts ON alerts(monitor_id, ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_id ON audit_logs(id DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
 CREATE INDEX IF NOT EXISTS idx_llm_models_channel ON llm_models(channel_id);
 CREATE INDEX IF NOT EXISTS idx_llm_checks_model_ts ON llm_checks(model_id, ts);
 CREATE INDEX IF NOT EXISTS idx_llm_alerts_model_ts ON llm_alerts(model_id, ts);
@@ -194,6 +210,11 @@ for (const sql of [
   'ALTER TABLE llm_models ADD COLUMN last_ttft_ms INTEGER',
   'ALTER TABLE llm_models ADD COLUMN last_tps REAL',
   'ALTER TABLE llm_models ADD COLUMN backoff_until INTEGER',
+  // 账号启用/停用、会话来源与活跃时间（老库补齐）
+  'ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0',
+  "ALTER TABLE sessions ADD COLUMN ip TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE sessions ADD COLUMN last_seen_at INTEGER',
 ]) {
   try {
     db.exec(sql);

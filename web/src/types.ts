@@ -265,7 +265,42 @@ export interface UserItem {
   id: number;
   username: string;
   role: 'admin' | 'operator' | 'viewer';
+  /** 1=已停用：不可登录，已有会话已失效 */
+  disabled: number;
   created_at: number;
+}
+
+/** 在线会话（服务端只下发 token 的散列 id，不含原始 token） */
+export interface SessionItem {
+  id: string;
+  user_id: number;
+  username: string;
+  role: 'admin' | 'operator' | 'viewer';
+  disabled: number;
+  ip: string;
+  user_agent: string;
+  created_at: number;
+  last_seen_at: number | null;
+  expires_at: number;
+  current: boolean;
+}
+
+export interface AuditLogItem {
+  id: number;
+  ts: number;
+  actor_id: number | null;
+  actor_name: string;
+  action: string;
+  target: string;
+  detail: string;
+  ip: string;
+}
+
+export interface AuditLogPayload {
+  logs: AuditLogItem[];
+  total: number;
+  /** 动作 key → 中文标签 */
+  actions: Record<string, string>;
 }
 
 // ---- 监控大屏 ----

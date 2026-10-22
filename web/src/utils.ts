@@ -80,10 +80,10 @@ export function fmtTime(ts?: string | null): string {
   return d.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
 }
 
-export function fmtRelative(ts?: string | null): string {
+export function fmtRelative(ts?: string | number | null): string {
   if (!ts) return '—';
   const d = new Date(ts).getTime();
-  if (Number.isNaN(d)) return ts;
+  if (Number.isNaN(d)) return String(ts);
   const diff = Date.now() - d;
   if (diff < 0) return fmtDateTime(ts);
   const min = Math.floor(diff / 60000);
