@@ -11,6 +11,7 @@ import { buildSystemStatus } from './systemStatus';
 import { buildSystemMetrics, parseMetricsRange } from './systemMetrics';
 import { checkVmHealth } from './vm';
 import { monitorsRouter } from './monitors';
+import { ledgerRouter } from './ledger';
 import { llmProfilesRouter } from './profiles';
 import { llmChannelsRouter } from './llmChannels';
 import {
@@ -319,6 +320,8 @@ apiRouter.delete('/systems/:id', requirePermission('systems.manage'), (req, res)
     db.prepare('DELETE FROM alerts WHERE monitor_id = ?').run(mid);
   }
   db.prepare('DELETE FROM monitors WHERE system_id = ?').run(id);
+  // 台账里的关联是可选引用：系统删除后条目保留，仅解除关联
+  db.prepare('UPDATE system_ledgers SET system_id = NULL, updated_at = ? WHERE system_id = ?').run(Date.now(), id);
   res.json({ ok: true });
 });
 
@@ -427,3 +430,6 @@ apiRouter.use(llmChannelsRouter);
 
 // ---- monitor CRUD ----
 apiRouter.use(monitorsRouter);
+
+// ---- 系统台账 ----
+apiRouter.use(ledgerRouter);

@@ -23,6 +23,20 @@ CREATE TABLE IF NOT EXISTS systems (
   auth_token TEXT,
   created_at INTEGER NOT NULL
 );
+-- 系统台账：资产登记，与监控系统（systems）独立，可选关联
+CREATE TABLE IF NOT EXISTS system_ledgers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  ip TEXT NOT NULL DEFAULT '',
+  external_access INTEGER NOT NULL DEFAULT 0,
+  domain_applied INTEGER NOT NULL DEFAULT 0,
+  domain TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  remark TEXT NOT NULL DEFAULT '',
+  system_id INTEGER REFERENCES systems(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS candidates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   system_id INTEGER NOT NULL REFERENCES systems(id) ON DELETE CASCADE,
@@ -148,6 +162,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_system_ledgers_system ON system_ledgers(system_id);
 CREATE INDEX IF NOT EXISTS idx_checks_monitor_ts ON checks(monitor_id, ts);
 CREATE INDEX IF NOT EXISTS idx_alerts_monitor_ts ON alerts(monitor_id, ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);

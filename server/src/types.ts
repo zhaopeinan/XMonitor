@@ -15,6 +15,21 @@ export interface SystemRow {
   created_at: number;
 }
 
+/** 系统台账条目：资产登记信息，system_id 为可选关联的监控系统 */
+export interface SystemLedgerRow {
+  id: number;
+  name: string;
+  ip: string;
+  external_access: number;
+  domain_applied: number;
+  domain: string;
+  location: string;
+  remark: string;
+  system_id: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
 export type UserRole = 'admin' | 'operator' | 'viewer';
 
 export interface UserRow {

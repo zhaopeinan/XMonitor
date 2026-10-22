@@ -102,6 +102,7 @@ export interface SystemStatusPayload {
     data_dir_bytes: number | null;
     tables: {
       systems: number;
+      ledger_entries: number;
       monitors: number;
       monitors_enabled: number;
       checks: number;
@@ -203,6 +204,7 @@ export async function buildSystemStatus(): Promise<SystemStatusPayload> {
       data_dir_bytes: dirSizeBytes(dataDir),
       tables: {
         systems: count('SELECT COUNT(*) AS n FROM systems'),
+        ledger_entries: count('SELECT COUNT(*) AS n FROM system_ledgers'),
         monitors: count('SELECT COUNT(*) AS n FROM monitors'),
         monitors_enabled: count('SELECT COUNT(*) AS n FROM monitors WHERE enabled = 1'),
         checks: count('SELECT COUNT(*) AS n FROM checks'),
