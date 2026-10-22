@@ -10,8 +10,9 @@ services:
       - "-storageDataPath=/victoria-metrics-data"
       - "-retentionPeriod=30d"
       - "-httpListenAddr=:8428"
-      - "-memory.allowedBytes=512MB"
-    mem_limit: 768m
+      - "-memory.allowedBytes=2GB"
+    # 合并/落盘时会短暂冲高，768m 实测会被 cgroup OOM 杀掉（线上曾每 5 分钟重启一次）
+    mem_limit: 4g
     volumes:
       - ./vm-data:/victoria-metrics-data
     ports:
