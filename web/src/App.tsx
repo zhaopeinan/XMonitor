@@ -7,6 +7,7 @@ import AnalyzeWizard from './pages/AnalyzeWizard';
 import Dashboard from './pages/Dashboard';
 import LlmChannelDetail from './pages/LlmChannelDetail';
 import LlmMonitorWizard from './pages/LlmMonitorWizard';
+import Ledger from './pages/Ledger';
 import Login from './pages/Login';
 import Screen from './pages/Screen';
 import Settings from './pages/Settings';
@@ -38,6 +39,7 @@ function Guard() {
         <Route path="/llm/new" element={canLlm ? <LlmMonitorWizard /> : <Navigate to="/" replace />} />
         <Route path="/llm/channels/:id" element={<LlmChannelDetail />} />
         <Route path="/systems/:id" element={<SystemDetail />} />
+        <Route path="/ledger" element={<Ledger />} />
         <Route path="/alerts" element={<Alerts />} />
         <Route path="/settings" element={hasPermission('settings.manage') ? <Settings /> : <Navigate to="/" replace />} />
         <Route path="/users" element={hasPermission('users.manage') ? <Users /> : <Navigate to="/" replace />} />

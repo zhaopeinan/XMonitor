@@ -186,6 +186,12 @@ export default function Layout() {
             </svg>
             监控大屏
           </NavLink>
+          <NavLink to="/ledger" className={navClasses}>
+            <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+              <path d="M4 2a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h9.5a.75.75 0 0 0 0-1.5H4a.5.5 0 0 1-.5-.5V4a.5.5 0 0 1 .5-.5h12a.5.5 0 0 1 .5.5v3.25a.75.75 0 0 0 1.5 0V4a2 2 0 0 0-2-2H4zm11.28 7.22a.75.75 0 0 0-1.06 0l-4.47 4.47-1.47-1.47a.75.75 0 1 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l5-5a.75.75 0 0 0 0-1.06z" />
+            </svg>
+            系统台账
+          </NavLink>
           {canUsers && (
             <NavLink to="/users" className={navClasses}>
               <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">

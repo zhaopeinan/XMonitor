@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import LatencyChart from '../components/LatencyChart';
@@ -7,7 +7,15 @@ import { LatencySeriesChart, UptimeSeriesChart } from '../components/MetricsSeri
 import { useConfirm } from '../components/ConfirmDialog';
 import { StatusBadge, StatusDot, TypeBadge, ExpectBadge } from '../components/StatusDot';
 import { Card, EmptyState, ErrorBanner, PageHeader, Skeleton, Spinner, SsoBadge, Toggle } from '../components/ui';
-import type { Alert, CheckRecord, MetricsRange, MonitorSummary, SystemMetricsPayload, SystemSummary } from '../types';
+import type {
+  Alert,
+  CheckRecord,
+  LedgerEntry,
+  MetricsRange,
+  MonitorSummary,
+  SystemMetricsPayload,
+  SystemSummary,
+} from '../types';
 import {
   alertKindMeta,
   errMsg,
@@ -145,6 +153,7 @@ export default function SystemDetail() {
   const [editPending, setEditPending] = useState(false);
   const [deletePending, setDeletePending] = useState(false);
   const [reversePending, setReversePending] = useState(false);
+  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -179,6 +188,20 @@ export default function SystemDetail() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 关联台账（可选关联，失败时不阻塞详情页）
+  const loadLedger = useCallback(async () => {
+    try {
+      const res = await api.getLedger({ system_id: systemId });
+      setLedger(res.entries ?? []);
+    } catch {
+      setLedger([]);
+    }
+  }, [systemId]);
+
+  useEffect(() => {
+    void loadLedger();
+  }, [loadLedger]);
 
   const loadMetrics = useCallback(async () => {
     if (!Number.isFinite(systemId) || systemId <= 0) return;
@@ -533,6 +556,60 @@ export default function SystemDetail() {
             · {system.reverse_count}/{system.monitors.length} 项期望不可达；若仍能访问将告警「仍可访问」。其余项保持正向（宕机/缓慢告警）。
           </span>
         </div>
+      )}
+
+      {/* 关联台账（可选关联） */}
+      {ledger.length > 0 && (
+        <Card className="mb-5 p-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">台账信息</h3>
+              <p className="mt-0.5 text-xs text-slate-400">
+                来自系统台账的资产登记（{ledger.length} 条）
+              </p>
+            </div>
+            <Link to="/ledger" className="text-xs font-medium text-indigo-600 hover:underline">
+              前往系统台账
+            </Link>
+          </div>
+          <div className="space-y-3">
+            {ledger.map((e) => (
+              <div key={e.id} className="rounded-lg border border-slate-100 bg-slate-50/60 px-4 py-3">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+                  <div>
+                    <p className="text-[11px] text-slate-400">IP</p>
+                    <p className="mt-0.5 break-all font-mono text-sm text-slate-700">{e.ip || '—'}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] text-slate-400">外网访问</p>
+                    <p className="mt-0.5 text-sm text-slate-700">
+                      {isTruthy(e.external_access) ? (
+                        <span className="font-medium text-amber-700">开放</span>
+                      ) : (
+                        '未开放'
+                      )}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] text-slate-400">域名</p>
+                    <p className="mt-0.5 break-all font-mono text-sm text-slate-700">
+                      {isTruthy(e.domain_applied) ? e.domain || '已申请·未填' : '未申请'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] text-slate-400">物理机位置</p>
+                    <p className="mt-0.5 text-sm text-slate-700">{e.location || '—'}</p>
+                  </div>
+                </div>
+                {e.remark && (
+                  <p className="mt-2.5 whitespace-pre-wrap border-t border-slate-200/70 pt-2.5 text-xs text-slate-500">
+                    {e.remark}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
       )}
 
       {/* 长期监控曲线 */}

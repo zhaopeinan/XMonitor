@@ -4,6 +4,8 @@ import type {
   AnalysisResult,
   CheckRecord,
   DashboardData,
+  LedgerEntry,
+  LedgerEntryInput,
   LlmChannel,
   LlmModel,
   LlmProfile,
@@ -117,6 +119,23 @@ export const api = {
 
   getAlerts: () => request<AlertsResponse>('/api/alerts'),
   ackAlert: (id: number) => post<unknown>(`/api/alerts/${id}/ack`),
+
+  // ---- 系统台账 ----
+  listSystems: () => request<{ systems: SystemInfo[] }>('/api/systems'),
+  getLedger: (params?: { system_id?: number; external_access?: 0 | 1 }) => {
+    const qs = new URLSearchParams();
+    if (params?.system_id !== undefined) qs.set('system_id', String(params.system_id));
+    if (params?.external_access !== undefined) qs.set('external_access', String(params.external_access));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return request<{ entries: LedgerEntry[] }>(`/api/ledger${suffix}`);
+  },
+  createLedgerEntry: (body: LedgerEntryInput) => post<LedgerEntry>('/api/ledger', body),
+  updateLedgerEntry: (id: number, body: LedgerEntryInput) =>
+    request<LedgerEntry>(`/api/ledger/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteLedgerEntry: (id: number) => request<unknown>(`/api/ledger/${id}`, { method: 'DELETE' }),
 
   getSettings: () => request<SettingsMap>('/api/settings'),
   putSettings: (settings: SettingsMap) =>

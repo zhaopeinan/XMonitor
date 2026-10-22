@@ -212,6 +212,7 @@ export default function SystemStatus() {
                 <Stat label="WAL" value={fmtBytes(data.sqlite.wal_bytes)} />
                 <Stat label="data 目录" value={fmtBytes(data.sqlite.data_dir_bytes)} />
                 <Stat label="系统 / 监控项" value={`${t?.systems ?? 0} / ${t?.monitors ?? 0}`} hint={`启用 ${t?.monitors_enabled ?? 0}`} />
+                <Stat label="台账条目" value={t?.ledger_entries ?? 0} />
                 <Stat label="探测记录" value={(t?.checks ?? 0).toLocaleString()} hint={`近 24h ${t?.checks_24h ?? 0}`} />
                 <Stat
                   label="LLM 渠道 / 模型"

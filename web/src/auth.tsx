@@ -4,6 +4,7 @@ import { api, ApiError } from './api';
 export type UserRole = 'admin' | 'operator' | 'viewer';
 export type Permission =
   | 'systems.manage'
+  | 'ledger.manage'
   | 'analyze'
   | 'alerts.ack'
   | 'settings.manage'

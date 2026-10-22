@@ -41,6 +41,34 @@ export interface SystemRow extends SystemInfo {
   created_at?: string;
 }
 
+/** 系统台账条目：资产登记信息，system_id 为可选关联的监控系统 */
+export interface LedgerEntry {
+  id: number;
+  name: string;
+  ip: string;
+  external_access: boolean | number;
+  domain_applied: boolean | number;
+  domain: string;
+  location: string;
+  remark: string;
+  system_id: number | null;
+  system_name: string | null;
+  system_base_url: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface LedgerEntryInput {
+  name: string;
+  ip?: string;
+  external_access?: boolean;
+  domain_applied?: boolean;
+  domain?: string;
+  location?: string;
+  remark?: string;
+  system_id?: number | null;
+}
+
 export interface SystemSummary extends SystemInfo {
   overall_status: MonitorStatus | string | null;
   reverse_count?: number;
@@ -396,6 +424,7 @@ export interface SystemStatusPayload {
     data_dir_bytes: number | null;
     tables: {
       systems: number;
+      ledger_entries: number;
       monitors: number;
       monitors_enabled: number;
       checks: number;
