@@ -288,8 +288,8 @@ export default function Layout() {
         </div>
       </aside>
 
-      {/* 主区域 */}
-      <div className="ml-60 flex min-h-screen flex-1 flex-col">
+      {/* 主区域：min-w-0 让 flex 子项可按可用宽度收缩，宽表格改为在卡片内部横向滚动 */}
+      <div className="ml-60 flex min-h-screen min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-10 flex h-14 items-center justify-end gap-4 border-b border-slate-200 bg-white/80 px-6 backdrop-blur">
           <span className="flex items-center gap-1.5 text-xs text-slate-400">
             <span className={`h-1.5 w-1.5 rounded-full ${wsOk ? 'bg-emerald-500' : 'bg-slate-300'}`} />
