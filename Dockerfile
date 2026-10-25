@@ -1,5 +1,9 @@
+# 基础镜像可覆盖：Docker Hub 不可达时可指向镜像站，例如
+#   docker build --build-arg NODE_IMAGE=docker.1ms.run/library/node:20-bookworm-slim -t xmonitor:0.1.0 .
+ARG NODE_IMAGE=node:20-bookworm-slim
+
 # ---- build frontend ----
-FROM node:20-bookworm-slim AS web-build
+FROM ${NODE_IMAGE} AS web-build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY web/package.json web/
@@ -9,7 +13,7 @@ COPY web web
 RUN npm run build -w web
 
 # ---- runtime（内置 Chromium，提供 Obscura/CDP）----
-FROM node:20-bookworm-slim
+FROM ${NODE_IMAGE}
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     python3 make g++ \
