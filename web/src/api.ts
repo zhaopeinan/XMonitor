@@ -10,6 +10,7 @@ import type {
   LedgerApplyResult,
   LedgerEntry,
   LedgerEntryInput,
+  LedgerOsProbeResult,
   LedgerScanResult,
   LlmChannel,
   LlmModel,
@@ -146,6 +147,9 @@ export const api = {
   scanLedgerIps: (ids: number[]) => post<LedgerScanResult>('/api/ledger/scan-ips', { ids }),
   applyLedgerIps: (updates: { id: number; ip: string }[]) =>
     post<LedgerApplyResult>('/api/ledger/scan-ips/apply', { updates }),
+  probeLedgerOs: (ids: number[]) => post<LedgerOsProbeResult>('/api/ledger/probe-os', { ids }),
+  applyLedgerOs: (updates: { id: number; os: string; target: string; lines: string[] }[]) =>
+    post<LedgerApplyResult>('/api/ledger/probe-os/apply', { updates }),
 
   getSettings: () => request<SettingsMap>('/api/settings'),
   putSettings: (settings: SettingsMap) =>

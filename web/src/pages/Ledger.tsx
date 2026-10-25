@@ -5,15 +5,38 @@ import { useConfirm } from '../components/ConfirmDialog';
 import { useAuth } from '../auth';
 import { Card, ErrorBanner, PageHeader, Spinner } from '../components/ui';
 import { Select } from '../components/Select';
-import type { LedgerEntry, LedgerScanItem, LedgerScanResult, SystemInfo } from '../types';
+import type {
+  LedgerEntry,
+  LedgerOsEvidence,
+  LedgerOsProbeItem,
+  LedgerOsProbeResult,
+  LedgerScanItem,
+  LedgerScanResult,
+  SystemInfo,
+} from '../types';
 import { errMsg, isInternalAddress, isTruthy } from '../utils';
 
 const inputCls =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 placeholder-slate-400 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200';
 
-/** 扫描结果弹窗里的快捷勾选按钮样式 */
+/** 扫描 / 探测结果弹窗里的快捷勾选按钮样式 */
 const chipBtnCls =
   'rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40';
+
+/** 操作系统探测：一条证据渲染成一行文本，和服务端存档的格式保持一致 */
+function osEvidenceLine(ev: LedgerOsEvidence): string {
+  return `${ev.port}/tcp ${ev.source}${ev.detail ? `：${ev.detail}` : ''}`;
+}
+
+/** 「探测于 2026-10-25 18:20」 */
+function osCheckedText(at: number | null | undefined): string | null {
+  if (!at) return null;
+  const d = new Date(at);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `探测于 ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(
+    d.getMinutes(),
+  )}`;
+}
 
 type ExternalFilter = 'all' | 'yes' | 'no';
 type DomainFilter = 'all' | 'yes' | 'no';
@@ -182,6 +205,16 @@ const SCAN_STATUS: Record<LedgerScanItem['status'], { label: string; cls: string
   missing: { label: '条目不存在', cls: 'border-rose-200 bg-rose-50 text-rose-600' },
 };
 
+/** 操作系统探测结果的状态标签 */
+const OS_STATUS: Record<LedgerOsProbeItem['status'], { label: string; cls: string }> = {
+  fill: { label: '可补操作系统', cls: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
+  change: { label: '与已登记不同', cls: 'border-amber-200 bg-amber-50 text-amber-700' },
+  same: { label: '无变化', cls: 'border-slate-200 bg-slate-50 text-slate-500' },
+  skipped: { label: '证据不足', cls: 'border-slate-200 bg-slate-50 text-slate-500' },
+  error: { label: '探测不到', cls: 'border-rose-200 bg-rose-50 text-rose-600' },
+  missing: { label: '条目不存在', cls: 'border-rose-200 bg-rose-50 text-rose-600' },
+};
+
 function scanSummaryText(s: LedgerScanResult['summary']): string {
   const parts = [`可补 IP ${s.fill} 条`, `与已有 IP 不同 ${s.change} 条`, `无变化 ${s.same} 条`];
   if (s.skipped > 0) parts.push(`跳过 ${s.skipped} 条`);
@@ -189,10 +222,18 @@ function scanSummaryText(s: LedgerScanResult['summary']): string {
   return `扫描 ${s.total} 条：${parts.join('，')}`;
 }
 
+function osSummaryText(s: LedgerOsProbeResult['summary']): string {
+  const parts = [`可补操作系统 ${s.fill} 条`, `与已登记不同 ${s.change} 条`, `无变化 ${s.same} 条`];
+  if (s.skipped > 0) parts.push(`证据不足 ${s.skipped} 条`);
+  if (s.failed > 0) parts.push(`探测不到 ${s.failed} 条`);
+  return `探测 ${s.total} 条：${parts.join('，')}`;
+}
+
 interface FormState {
   name: string;
   ops_unit: string;
   ip: string;
+  os: string;
   external_access: boolean;
   domain_applied: boolean;
   domain: string;
@@ -205,6 +246,7 @@ const EMPTY_FORM: FormState = {
   name: '',
   ops_unit: '',
   ip: '',
+  os: '',
   external_access: false,
   domain_applied: false,
   domain: '',
@@ -218,6 +260,7 @@ function formFromEntry(entry: LedgerEntry): FormState {
     name: entry.name,
     ops_unit: entry.ops_unit ?? '',
     ip: entry.ip ?? '',
+    os: entry.os ?? '',
     external_access: isTruthy(entry.external_access),
     domain_applied: isTruthy(entry.domain_applied),
     domain: entry.domain ?? '',
@@ -258,6 +301,12 @@ export default function Ledger() {
   const [scanChecked, setScanChecked] = useState<Set<number>>(new Set());
   const [scanError, setScanError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
+  // 操作系统探测（同一批勾选，另一套结果）
+  const [probing, setProbing] = useState(false);
+  const [osResult, setOsResult] = useState<LedgerOsProbeResult | null>(null);
+  const [osChecked, setOsChecked] = useState<Set<number>>(new Set());
+  const [osError, setOsError] = useState<string | null>(null);
+  const [osApplying, setOsApplying] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -316,7 +365,7 @@ export default function Ledger() {
         if (linkFilter === 'linked' ? !linked : linked) return false;
       }
       if (!q) return true;
-      return [e.name, e.ops_unit, e.ip, e.domain, e.location, e.remark, e.system_name ?? '']
+      return [e.name, e.ops_unit, e.ip, e.os, e.domain, e.location, e.remark, e.system_name ?? '']
         .join(' ')
         .toLowerCase()
         .includes(q);
@@ -324,12 +373,13 @@ export default function Ledger() {
   }, [entries, query, externalFilter, domainFilter, linkFilter]);
 
   const counts = useMemo(() => {
-    const c = { total: 0, external: 0, domain: 0, linked: 0 };
+    const c = { total: 0, external: 0, domain: 0, linked: 0, os: 0 };
     for (const e of entries ?? []) {
       c.total += 1;
       if (isTruthy(e.external_access)) c.external += 1;
       if (isTruthy(e.domain_applied)) c.domain += 1;
       if (e.system_id !== null && e.system_id !== undefined) c.linked += 1;
+      if ((e.os ?? '').trim()) c.os += 1;
     }
     return c;
   }, [entries]);
@@ -420,6 +470,76 @@ export default function Ledger() {
     }
   };
 
+  /** 操作系统探测弹窗里已勾选、且会覆盖已登记值的条数 */
+  const osOverwriteCount = (osResult?.results ?? []).filter(
+    (it) => it.status === 'change' && osChecked.has(it.id),
+  ).length;
+
+  /** 探测结果里可一键纳入的条目：操作系统为空 / 与已登记的不同 */
+  const osFillIds = useMemo(
+    () => (osResult?.results ?? []).filter((it) => it.status === 'fill' && it.probed_os).map((it) => it.id),
+    [osResult],
+  );
+  const osChangeIds = useMemo(
+    () => (osResult?.results ?? []).filter((it) => it.status === 'change' && it.probed_os).map((it) => it.id),
+    [osResult],
+  );
+
+  /** 操作系统探测：按 IP 连端口读横幅（只读），结果给用户在弹窗里复核后才写回 */
+  const runOsProbe = async () => {
+    if (probing || selected.size === 0) return;
+    setProbing(true);
+    setOsError(null);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await api.probeLedgerOs([...selected]);
+      setOsResult(r);
+      // 默认只勾「操作系统为空」的条目；与已登记不同的要用户自己确认，避免覆盖人工登记的值
+      setOsChecked(new Set(r.results.filter((it) => it.status === 'fill').map((it) => it.id)));
+    } catch (e) {
+      setOsError(errMsg(e));
+    } finally {
+      setProbing(false);
+    }
+  };
+
+  /** 把弹窗里勾选过的探测结论写回台账 */
+  const applyOsProbe = async () => {
+    if (!osResult || osApplying) return;
+    const updates = osResult.results.flatMap((it) =>
+      osChecked.has(it.id) && it.probed_os && it.target
+        ? [
+            {
+              id: it.id,
+              os: it.probed_os,
+              target: it.target,
+              lines: it.evidence.map((ev) => `${osEvidenceLine(ev)}（${ev.note}）`),
+            },
+          ]
+        : [],
+    );
+    if (updates.length === 0) return;
+    setOsApplying(true);
+    setOsError(null);
+    try {
+      const r = await api.applyLedgerOs(updates);
+      setOsResult(null);
+      setOsChecked(new Set());
+      setSelected(new Set());
+      setNotice(
+        `已把 ${r.updated} 条台账的操作系统写入${
+          r.overwritten > 0 ? `，其中 ${r.overwritten} 条原值已记入备注` : ''
+        }${r.missing.length > 0 ? `；${r.missing.length} 条已不存在，未写入` : ''}`,
+      );
+      await load();
+    } catch (e) {
+      setOsError(errMsg(e));
+    } finally {
+      setOsApplying(false);
+    }
+  };
+
   const openCreate = () => {
     setEditing(null);
     setForm(EMPTY_FORM);
@@ -503,6 +623,7 @@ export default function Ledger() {
       name: form.name.trim(),
       ops_unit: form.ops_unit.trim(),
       ip: form.ip.trim(),
+      os: form.os.trim(),
       external_access: form.external_access,
       domain_applied: form.domain_applied,
       domain: form.domain_applied ? form.domain.trim() : '',
@@ -587,12 +708,13 @@ export default function Ledger() {
         }
       />
 
-      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {(
           [
             { label: '台账条目', value: counts.total, hint: '全部登记系统' },
             { label: '开放外网', value: counts.external, hint: '需重点关注暴露面' },
             { label: '已申请域名', value: counts.domain, hint: '走域名访问' },
+            { label: '已登记操作系统', value: counts.os, hint: '人工登记或探测写入' },
             { label: '已关联监控', value: counts.linked, hint: '与监控系统挂钩' },
           ] as const
         ).map((s) => (
@@ -678,12 +800,21 @@ export default function Ledger() {
                 </button>
               </>
             ) : (
-              <span className="text-xs text-slate-400">勾选条目后可批量查 DNS 并回填 IP</span>
+              <span className="text-xs text-slate-400">勾选条目后可批量查 DNS 回填 IP，或探测服务器操作系统</span>
             )}
             <div className="ml-auto flex flex-wrap items-center gap-3">
               <span className="hidden text-[11px] text-slate-400 sm:inline">
-                扫描只查 DNS、不改数据，结果确认后才写入
+                两个动作都只读探测、不改数据，结果确认后才写入
               </span>
+              <button
+                type="button"
+                disabled={selected.size === 0 || probing}
+                onClick={() => void runOsProbe()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {probing && <Spinner className="h-3.5 w-3.5" />}
+                {probing ? '探测中…' : '操作系统探测'}
+              </button>
               <button
                 type="button"
                 disabled={selected.size === 0 || scanning}
@@ -723,7 +854,7 @@ export default function Ledger() {
         ) : (
           <div className="overflow-x-auto">
             {/* 列较多，给表格一个最小宽度：窄屏时横向滚动，避免列被压成逐字换行 */}
-            <table className="w-full min-w-[1140px] text-sm">
+            <table className="w-full min-w-[1260px] text-sm">
               <thead>
                 <tr className="whitespace-nowrap border-b border-slate-100 bg-slate-50/80 text-left text-xs text-slate-400">
                   {canWrite && (
@@ -740,6 +871,7 @@ export default function Ledger() {
                   <th className={`py-3 font-medium ${canWrite ? 'pl-2 pr-3' : 'px-5'}`}>系统名称</th>
                   <th className="px-3 py-3 font-medium">运维单位</th>
                   <th className="px-3 py-3 font-medium">IP</th>
+                  <th className="px-3 py-3 font-medium">操作系统</th>
                   <th className="px-3 py-3 font-medium">外网访问</th>
                   <th className="px-3 py-3 font-medium">域名</th>
                   <th className="px-3 py-3 font-medium">物理机位置</th>
@@ -782,6 +914,18 @@ export default function Ledger() {
                       <td className="whitespace-nowrap px-3 py-3.5">
                         {e.ip ? (
                           <span className="font-mono text-xs text-slate-600">{e.ip}</span>
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
+                      </td>
+                      <td className="max-w-[15rem] px-3 py-3.5">
+                        {e.os ? (
+                          <span
+                            className="block cursor-help truncate text-slate-600"
+                            title={[e.os_evidence, osCheckedText(e.os_checked_at)].filter(Boolean).join('\n\n')}
+                          >
+                            {e.os}
+                          </span>
                         ) : (
                           <span className="text-slate-300">—</span>
                         )}
@@ -953,6 +1097,29 @@ export default function Ledger() {
               </div>
             )}
           </Field>
+
+          <Field
+            label="操作系统"
+            hint="人工登记，或勾选条目后点「操作系统探测」按 IP 探测后写入；探测依据与时间会随条目保存"
+          >
+            <input
+              className={inputCls}
+              value={form.os}
+              onChange={(e) => setForm((f) => ({ ...f, os: e.target.value }))}
+              placeholder="例如 Linux（Ubuntu）/ Windows（IIS 10.0）"
+            />
+          </Field>
+
+          {editing?.os_evidence && (
+            <details className="mb-4 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3">
+              <summary className="cursor-pointer text-xs font-medium text-slate-600">
+                查看上次探测依据{osCheckedText(editing.os_checked_at) ? `（${osCheckedText(editing.os_checked_at)}）` : ''}
+              </summary>
+              <pre className="mt-2 whitespace-pre-wrap font-sans text-[11px] leading-relaxed text-slate-500">
+                {editing.os_evidence}
+              </pre>
+            </details>
+          )}
 
           <div className="mb-4 flex flex-wrap gap-8">
             <div>
@@ -1189,6 +1356,174 @@ export default function Ledger() {
                         <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
                           DNS 共返回 {it.addresses.length} 个地址：
                           {it.addresses.map((a) => a.address).join('、')}，默认写入第一个；其余需要时手动补进 IP
+                        </p>
+                      )}
+                      {it.message && <p className="mt-1 text-[11px] text-slate-500">{it.message}</p>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {/* 操作系统探测结果：先复核结论与依据，勾选后才写回台账 */}
+      {osResult && (
+        <Modal
+          title="操作系统探测结果"
+          description={
+            <>
+              <p>{osSummaryText(osResult.summary)}</p>
+              <p className="mt-1 text-xs text-slate-400">
+                这次探测只连了端口、读了服务横幅，还没有改动台账；结论是按证据推断的，可能不准，写入前请看一眼依据。
+              </p>
+            </>
+          }
+          size="lg"
+          onClose={() => !osApplying && setOsResult(null)}
+          footer={
+            <>
+              <span className="mr-auto text-xs text-slate-500">
+                {osChecked.size > 0
+                  ? `将写入 ${osChecked.size} 条${
+                      osOverwriteCount > 0 ? `（其中覆盖已登记值 ${osOverwriteCount} 条，原值会记入备注）` : ''
+                    }`
+                  : '勾选要写入的条目'}
+              </span>
+              <button
+                type="button"
+                disabled={osApplying}
+                onClick={() => setOsResult(null)}
+                className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+              >
+                关闭
+              </button>
+              <button
+                type="button"
+                disabled={osApplying || osChecked.size === 0}
+                onClick={() => void applyOsProbe()}
+                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-40"
+              >
+                {osApplying && <Spinner className="border-white/40 border-t-white" />}
+                写入台账
+              </button>
+            </>
+          }
+        >
+          {osError && (
+            <div className="mb-4">
+              <ErrorBanner message={osError} />
+            </div>
+          )}
+
+          {osResult.results.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button type="button" className={chipBtnCls} onClick={() => setOsChecked(new Set(osFillIds))}>
+                只选空值 ({osFillIds.length})
+              </button>
+              <button
+                type="button"
+                className={chipBtnCls}
+                disabled={osChangeIds.length === 0}
+                onClick={() => setOsChecked((prev) => new Set([...prev, ...osChangeIds]))}
+              >
+                加上全部差异项 ({osChangeIds.length})
+              </button>
+              <button
+                type="button"
+                className={chipBtnCls}
+                disabled={osChecked.size === 0}
+                onClick={() => setOsChecked(new Set())}
+              >
+                全不选
+              </button>
+              <span className="ml-auto text-xs text-slate-400">已勾选 {osChecked.size} 条</span>
+            </div>
+          )}
+
+          {osResult.summary.change > 0 && (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs leading-relaxed text-amber-700">
+              有 {osResult.summary.change} 条已登记的操作系统与探测结论不同，默认不勾选；确认要改的可以逐条勾，
+              或点上方「加上全部差异项」一键纳入。写入时原值会自动记入备注留痕。
+            </div>
+          )}
+
+          {osResult.summary.skipped + osResult.summary.failed > 0 && (
+            <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs leading-relaxed text-slate-500">
+              探测是「端口 + 服务横幅」推断，不是登录进去看：目标不可达、端口被防火墙拦掉、或者只开了不带系统信息的
+              服务时，只能给出「证据不足」。这类条目可以到编辑弹窗里人工登记。
+            </div>
+          )}
+
+          {osResult.results.length === 0 ? (
+            <p className="py-6 text-center text-sm text-slate-400">没有可探测的条目</p>
+          ) : (
+            <div className="space-y-2">
+              {osResult.results.map((it) => {
+                const writable = (it.status === 'fill' || it.status === 'change') && it.probed_os !== '';
+                const checked = osChecked.has(it.id);
+                const badge = OS_STATUS[it.status];
+                return (
+                  <div
+                    key={it.id}
+                    className={`flex items-start gap-3 rounded-xl border px-3.5 py-2.5 ${
+                      checked ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200'
+                    }`}
+                  >
+                    <span className="pt-1">
+                      <Checkbox
+                        checked={checked}
+                        disabled={!writable}
+                        onChange={(next) =>
+                          setOsChecked((prev) => {
+                            const set = new Set(prev);
+                            if (next) set.add(it.id);
+                            else set.delete(it.id);
+                            return set;
+                          })
+                        }
+                        ariaLabel={`写入「${it.name}」的操作系统`}
+                      />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="text-sm font-medium text-slate-900">{it.name}</span>
+                        {it.target && <span className="font-mono text-xs text-slate-500">{it.target}</span>}
+                        <span
+                          className={`ml-auto inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${badge.cls}`}
+                        >
+                          {badge.label}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                        <span className="text-slate-400">当前</span>
+                        <span className={it.current_os ? 'text-slate-600' : 'text-slate-300'}>
+                          {it.current_os || '空'}
+                        </span>
+                        <span className="text-slate-300">→</span>
+                        <span className="text-slate-400">探测</span>
+                        <span className={it.probed_os ? 'font-medium text-slate-900' : 'text-slate-300'}>
+                          {it.probed_os || '—'}
+                        </span>
+                        {it.elapsed_ms > 0 && <span className="text-slate-400">{it.elapsed_ms}ms</span>}
+                      </div>
+                      {it.evidence.length > 0 && (
+                        <ul className="mt-1.5 space-y-0.5">
+                          {it.evidence.map((ev) => (
+                            <li key={`${ev.port}-${ev.source}`} className="flex gap-1.5 text-[11px] leading-relaxed">
+                              <span className="text-slate-300">·</span>
+                              <span className="min-w-0">
+                                <span className="font-mono text-slate-600">{osEvidenceLine(ev)}</span>
+                                <span className="text-slate-400">（{ev.note}）</span>
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {it.open_ports.length > 0 && (
+                        <p className="mt-1 text-[11px] text-slate-400">
+                          开放端口：{it.open_ports.join(', ')}
                         </p>
                       )}
                       {it.message && <p className="mt-1 text-[11px] text-slate-500">{it.message}</p>}

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { lookup } from 'node:dns';
 import { isIP } from 'node:net';
 import { db } from './db';
+import { probeHostOs, type OsEvidence } from './osProbe';
 import { requirePermission } from './users';
 import type { SystemLedgerRow } from './types';
 
@@ -92,6 +93,7 @@ interface EntryInput {
   name: string;
   ops_unit: string;
   ip: string;
+  os: string;
   external_access: number;
   domain_applied: number;
   domain: string;
@@ -153,6 +155,8 @@ function readEntryInput(body: unknown, existing?: SystemLedgerRow): Validated<En
       name,
       ops_unit: b.ops_unit === undefined && existing ? existing.ops_unit : normalizeText(b.ops_unit, 120),
       ip: ipResult.value,
+      // 操作系统可以由探测写入，也允许人工登记/修正：表单传什么就存什么
+      os: b.os === undefined && existing ? existing.os : normalizeText(b.os, 120),
       external_access: externalAccess,
       domain_applied: domainApplied,
       domain: domainResult.value,
@@ -196,13 +200,14 @@ ledgerRouter.post('/ledger', requirePermission('ledger.manage'), (req, res) => {
   const v = input.value;
   const info = db
     .prepare(
-      `INSERT INTO system_ledgers(name, ops_unit, ip, external_access, domain_applied, domain, location, remark, system_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO system_ledgers(name, ops_unit, ip, os, external_access, domain_applied, domain, location, remark, system_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       v.name,
       v.ops_unit,
       v.ip,
+      v.os,
       v.external_access,
       v.domain_applied,
       v.domain,
@@ -224,12 +229,13 @@ ledgerRouter.patch('/ledger/:id', requirePermission('ledger.manage'), (req, res)
   const v = input.value;
   db.prepare(
     `UPDATE system_ledgers
-     SET name = ?, ops_unit = ?, ip = ?, external_access = ?, domain_applied = ?, domain = ?, location = ?, remark = ?, system_id = ?, updated_at = ?
+     SET name = ?, ops_unit = ?, ip = ?, os = ?, external_access = ?, domain_applied = ?, domain = ?, location = ?, remark = ?, system_id = ?, updated_at = ?
      WHERE id = ?`,
   ).run(
     v.name,
     v.ops_unit,
     v.ip,
+    v.os,
     v.external_access,
     v.domain_applied,
     v.domain,
@@ -465,15 +471,28 @@ ledgerRouter.post('/ledger/scan-ips', requirePermission('ledger.manage'), async 
 });
 
 /**
- * 覆盖旧 IP 时把原值记进备注留痕，避免扫描结果冲掉人工登记的地址后无从追溯。
+ * 覆盖旧值时把原值记进备注留痕，避免扫描/探测结果冲掉人工登记的内容后无从追溯。
  * 备注是自由文本，超过 2000 字时丢弃最早的内容，保留最近的记录。
  */
-function appendOverwriteTrace(remark: string, oldIp: string, at: number): string {
-  const d = new Date(at);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  const trace = `[原 IP ${oldIp} / ${day} 扫描覆盖]`;
+function appendOverwriteTrace(remark: string, label: string, oldValue: string, action: string, at: number): string {
+  const trace = `[原 ${label} ${oldValue} / ${formatDay(at)} ${action}]`;
   return (remark ? `${remark}\n${trace}` : trace).slice(-2000);
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/** 2026-10-25 */
+function formatDay(at: number): string {
+  const d = new Date(at);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+/** 2026-10-25 18:20 */
+function formatStamp(at: number): string {
+  const d = new Date(at);
+  return `${formatDay(at)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 /** 把扫描结果里用户勾选过的 IP 写回台账；覆盖已有 IP 时把旧值记入备注留痕 */
@@ -512,7 +531,9 @@ ledgerRouter.post('/ledger/scan-ips/apply', requirePermission('ledger.manage'), 
       }
       // 旧 IP 非空且与新值不同才算覆盖：把旧值追加进备注后再写入
       const overwrite = current.ip !== '' && current.ip !== row.ip;
-      const remark = overwrite ? appendOverwriteTrace(current.remark ?? '', current.ip, now) : current.remark ?? '';
+      const remark = overwrite
+        ? appendOverwriteTrace(current.remark ?? '', 'IP', current.ip, '扫描覆盖', now)
+        : current.remark ?? '';
       updateStatement.run(row.ip, remark, now, row.id);
       updated += 1;
       if (overwrite) overwritten += 1;
@@ -522,3 +543,203 @@ ledgerRouter.post('/ledger/scan-ips/apply', requirePermission('ledger.manage'), 
 
   res.json({ updated, missing, overwritten });
 });
+
+// ---- 操作系统探测：TCP 端口 + 服务横幅指纹，确认后再写回 ----
+
+/** 探测并发数：每条要连十来个端口，并发压低一点，别让内网设备同时被连一堆 */
+const PROBE_CONCURRENCY = 6;
+
+interface OsProbeItem {
+  id: number;
+  name: string;
+  ip: string;
+  /** 实际探测的目标地址（台账 IP 字段里的第一个地址） */
+  target: string | null;
+  current_os: string;
+  probed_os: string;
+  open_ports: number[];
+  evidence: OsEvidence[];
+  status: ScanStatus;
+  message: string | null;
+  elapsed_ms: number;
+}
+
+/** 台账 IP 字段可能存多个地址（逗号/空格分隔），探测只取第一个 */
+function probeTargetFromIp(ip: string): string | null {
+  const first = ip.split(/[\s,，;；、]+/).filter(Boolean)[0];
+  if (!first) return null;
+  const slash = first.indexOf('/');
+  const addr = slash === -1 ? first : first.slice(0, slash);
+  return isIP(addr) === 0 ? null : addr;
+}
+
+/** 探测一条台账：只读网络，不碰数据库 */
+async function probeEntry(row: SystemLedgerRow): Promise<OsProbeItem> {
+  const base: OsProbeItem = {
+    id: row.id,
+    name: row.name,
+    ip: row.ip,
+    target: null,
+    current_os: row.os ?? '',
+    probed_os: '',
+    open_ports: [],
+    evidence: [],
+    status: 'skipped',
+    message: null,
+    elapsed_ms: 0,
+  };
+
+  const target = probeTargetFromIp(row.ip ?? '');
+  if (!target) {
+    return { ...base, message: '没有可探测的 IP：先在 IP 字段填地址，或用「一键 IP 扫描」按域名补上' };
+  }
+
+  const { host } = row.domain ? hostFromDomain(row.domain) : { host: '' };
+  const started = Date.now();
+  const outcome = await probeHostOs(target, host);
+  const elapsed = Date.now() - started;
+
+  const probed = outcome.os;
+  const status: ScanStatus =
+    probed === ''
+      ? outcome.openPorts.length === 0
+        ? 'error'
+        : 'skipped'
+      : base.current_os === ''
+        ? 'fill'
+        : base.current_os === probed
+          ? 'same'
+          : 'change';
+
+  return {
+    ...base,
+    target,
+    probed_os: probed,
+    open_ports: outcome.openPorts,
+    evidence: outcome.evidence,
+    status,
+    message: outcome.message,
+    elapsed_ms: elapsed,
+  };
+}
+
+/** 批量探测操作系统（只读）。前端拿结果给用户复核，确认后再调 apply 写回 */
+ledgerRouter.post('/ledger/probe-os', requirePermission('ledger.manage'), async (req, res) => {
+  const raw = (req.body ?? {}) as { ids?: unknown };
+  if (!Array.isArray(raw.ids) || raw.ids.length === 0) {
+    return res.status(400).json({ error: '请先勾选要探测的台账条目' });
+  }
+  if (raw.ids.length > SCAN_MAX_IDS) {
+    return res.status(400).json({ error: `一次最多探测 ${SCAN_MAX_IDS} 条` });
+  }
+  const ids: number[] = [];
+  for (const value of raw.ids) {
+    const id = Number(value);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'ids 里含有不合法的条目 ID' });
+    if (!ids.includes(id)) ids.push(id);
+  }
+
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = db
+    .prepare(`SELECT * FROM system_ledgers WHERE id IN (${placeholders})`)
+    .all(...ids) as SystemLedgerRow[];
+  const byId = new Map(rows.map((row) => [row.id, row]));
+
+  const results = await mapLimit(ids, PROBE_CONCURRENCY, async (id): Promise<OsProbeItem> => {
+    const row = byId.get(id);
+    if (!row) {
+      return {
+        id,
+        name: `#${id}`,
+        ip: '',
+        target: null,
+        current_os: '',
+        probed_os: '',
+        open_ports: [],
+        evidence: [],
+        status: 'missing',
+        message: '条目已不存在（可能刚被删除）',
+        elapsed_ms: 0,
+      };
+    }
+    return probeEntry(row);
+  });
+
+  const summary = { total: results.length, fill: 0, change: 0, same: 0, skipped: 0, failed: 0 };
+  for (const item of results) {
+    if (item.status === 'fill') summary.fill += 1;
+    else if (item.status === 'change') summary.change += 1;
+    else if (item.status === 'same') summary.same += 1;
+    else if (item.status === 'skipped') summary.skipped += 1;
+    else summary.failed += 1;
+  }
+  res.json({ results, summary });
+});
+
+/** 把探测结果里用户勾选过的操作系统写回台账；覆盖已有值时把旧值记入备注留痕 */
+ledgerRouter.post('/ledger/probe-os/apply', requirePermission('ledger.manage'), (req, res) => {
+  const raw = (req.body ?? {}) as { updates?: unknown };
+  if (!Array.isArray(raw.updates) || raw.updates.length === 0) {
+    return res.status(400).json({ error: '没有要写入的条目' });
+  }
+  if (raw.updates.length > SCAN_MAX_IDS) {
+    return res.status(400).json({ error: `一次最多写入 ${SCAN_MAX_IDS} 条` });
+  }
+
+  const updates: { id: number; os: string; target: string; lines: string[] }[] = [];
+  for (const value of raw.updates) {
+    const item = (value ?? {}) as { id?: unknown; os?: unknown; target?: unknown; lines?: unknown };
+    const id = Number(item.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: '条目 ID 不合法' });
+    const os = normalizeText(item.os, 120);
+    if (!os) return res.status(400).json({ error: '写入的操作系统不能为空' });
+    const target = normalizeText(item.target, 64);
+    const lines = Array.isArray(item.lines)
+      ? item.lines
+          .map((line) => normalizeText(line, 200))
+          .filter(Boolean)
+          .slice(0, 40)
+      : [];
+    updates.push({ id, os, target, lines });
+  }
+
+  const now = Date.now();
+  const selectStatement = db.prepare('SELECT os, remark FROM system_ledgers WHERE id = ?');
+  const updateStatement = db.prepare(
+    'UPDATE system_ledgers SET os = ?, os_evidence = ?, os_checked_at = ?, remark = ?, updated_at = ? WHERE id = ?',
+  );
+  let updated = 0;
+  let overwritten = 0;
+  const missing: number[] = [];
+  const applyAll = db.transaction((rows: typeof updates) => {
+    for (const row of rows) {
+      const current = selectStatement.get(row.id) as { os: string; remark: string } | undefined;
+      if (!current) {
+        missing.push(row.id);
+        continue;
+      }
+      const evidence = buildOsEvidence(row.target, row.lines, row.os, now);
+      // 已有操作系统且与新值不同才算覆盖：把旧值追加进备注后再写入
+      const overwrite = (current.os ?? '') !== '' && current.os !== row.os;
+      const remark = overwrite
+        ? appendOverwriteTrace(current.remark ?? '', '操作系统', current.os, '探测覆盖', now)
+        : current.remark ?? '';
+      updateStatement.run(row.os, evidence, now, remark, now, row.id);
+      updated += 1;
+      if (overwrite) overwritten += 1;
+    }
+  });
+  applyAll(updates);
+
+  res.json({ updated, missing, overwritten });
+});
+
+/**
+ * 探测依据的存档文本：抬头写清探测目标和时间，逐条列出命中证据，最后落一句结论。
+ * 素材是自由文本，超过 2000 字时丢弃最早的记录。
+ */
+function buildOsEvidence(target: string, lines: string[], os: string, at: number): string {
+  const head = `探测目标 ${target || '（未记录）'} · ${formatStamp(at)}`;
+  const body = [head, ...lines, `结论：${os}`].join('\n');
+  return body.slice(-2000);
+}

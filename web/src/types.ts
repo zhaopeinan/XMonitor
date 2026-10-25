@@ -47,6 +47,12 @@ export interface LedgerEntry {
   name: string;
   ops_unit: string;
   ip: string;
+  /** 操作系统：人工登记或探测写入的结论，例如 Linux（Ubuntu） */
+  os: string;
+  /** 探测依据原文（含探测目标与时间） */
+  os_evidence: string;
+  /** 最近一次操作系统探测时间 */
+  os_checked_at: number | null;
   external_access: boolean | number;
   domain_applied: boolean | number;
   domain: string;
@@ -63,6 +69,7 @@ export interface LedgerEntryInput {
   name: string;
   ops_unit?: string;
   ip?: string;
+  os?: string;
   external_access?: boolean;
   domain_applied?: boolean;
   domain?: string;
@@ -106,6 +113,39 @@ export interface LedgerApplyResult {
   updated: number;
   missing: number[];
   overwritten: number;
+}
+
+/** 操作系统探测命中的一条证据 */
+export interface LedgerOsEvidence {
+  port: number;
+  source: string;
+  detail: string;
+  family: 'linux' | 'windows' | 'network';
+  version: string | null;
+  strong: boolean;
+  windowsService: boolean;
+  note: string;
+}
+
+/** 操作系统探测的单条结果 */
+export interface LedgerOsProbeItem {
+  id: number;
+  name: string;
+  ip: string;
+  target: string | null;
+  current_os: string;
+  probed_os: string;
+  open_ports: number[];
+  evidence: LedgerOsEvidence[];
+  status: LedgerScanStatus;
+  message: string | null;
+  elapsed_ms: number;
+}
+
+/** 操作系统探测的批量结果 */
+export interface LedgerOsProbeResult {
+  results: LedgerOsProbeItem[];
+  summary: { total: number; fill: number; change: number; same: number; skipped: number; failed: number };
 }
 
 export interface SystemSummary extends SystemInfo {
