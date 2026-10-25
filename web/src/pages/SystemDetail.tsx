@@ -577,6 +577,10 @@ export default function SystemDetail() {
               <div key={e.id} className="rounded-lg border border-slate-100 bg-slate-50/60 px-4 py-3">
                 <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
                   <div>
+                    <p className="text-[11px] text-slate-400">运维单位</p>
+                    <p className="mt-0.5 text-sm text-slate-700">{e.ops_unit || '—'}</p>
+                  </div>
+                  <div>
                     <p className="text-[11px] text-slate-400">IP</p>
                     <p className="mt-0.5 break-all font-mono text-sm text-slate-700">{e.ip || '—'}</p>
                   </div>

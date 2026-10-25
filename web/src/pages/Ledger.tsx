@@ -122,6 +122,7 @@ function ExternalBadge({ on }: { on: boolean }) {
 
 interface FormState {
   name: string;
+  ops_unit: string;
   ip: string;
   external_access: boolean;
   domain_applied: boolean;
@@ -133,6 +134,7 @@ interface FormState {
 
 const EMPTY_FORM: FormState = {
   name: '',
+  ops_unit: '',
   ip: '',
   external_access: false,
   domain_applied: false,
@@ -145,6 +147,7 @@ const EMPTY_FORM: FormState = {
 function formFromEntry(entry: LedgerEntry): FormState {
   return {
     name: entry.name,
+    ops_unit: entry.ops_unit ?? '',
     ip: entry.ip ?? '',
     external_access: isTruthy(entry.external_access),
     domain_applied: isTruthy(entry.domain_applied),
@@ -222,7 +225,7 @@ export default function Ledger() {
         if (linkFilter === 'linked' ? !linked : linked) return false;
       }
       if (!q) return true;
-      return [e.name, e.ip, e.domain, e.location, e.remark, e.system_name ?? '']
+      return [e.name, e.ops_unit, e.ip, e.domain, e.location, e.remark, e.system_name ?? '']
         .join(' ')
         .toLowerCase()
         .includes(q);
@@ -274,6 +277,7 @@ export default function Ledger() {
     setFormError(null);
     const payload = {
       name: form.name.trim(),
+      ops_unit: form.ops_unit.trim(),
       ip: form.ip.trim(),
       external_access: form.external_access,
       domain_applied: form.domain_applied,
@@ -345,7 +349,7 @@ export default function Ledger() {
     <div className="mx-auto max-w-6xl">
       <PageHeader
         title="系统台账"
-        description="登记系统的 IP、外网开放与域名申请情况、物理机位置；可选关联到监控系统，资产信息与可用性监控各管一头。"
+        description="登记系统的运维单位、IP、外网开放与域名申请情况、物理机位置；可选关联到监控系统，资产信息与可用性监控各管一头。"
         actions={
           canWrite ? (
             <button
@@ -410,7 +414,7 @@ export default function Ledger() {
             </div>
             <input
               className={`${inputCls} w-56 !py-1.5`}
-              placeholder="搜索名称 / IP / 域名 / 位置…"
+              placeholder="搜索名称 / 运维单位 / IP / 域名 / 位置…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -443,10 +447,11 @@ export default function Ledger() {
         ) : (
           <div className="overflow-x-auto">
             {/* 列较多，给表格一个最小宽度：窄屏时横向滚动，避免列被压成逐字换行 */}
-            <table className="w-full min-w-[960px] text-sm">
+            <table className="w-full min-w-[1080px] text-sm">
               <thead>
                 <tr className="whitespace-nowrap border-b border-slate-100 bg-slate-50/80 text-left text-xs text-slate-400">
                   <th className="px-5 py-3 font-medium">系统名称</th>
+                  <th className="px-3 py-3 font-medium">运维单位</th>
                   <th className="px-3 py-3 font-medium">IP</th>
                   <th className="px-3 py-3 font-medium">外网访问</th>
                   <th className="px-3 py-3 font-medium">域名</th>
@@ -468,6 +473,9 @@ export default function Ledger() {
                     <tr key={e.id} className="group border-b border-slate-50 last:border-0 hover:bg-slate-50">
                       <td className="whitespace-nowrap px-5 py-3.5">
                         <span className="font-medium text-slate-900">{e.name}</span>
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3.5 text-slate-600">
+                        {e.ops_unit || <span className="text-slate-300">—</span>}
                       </td>
                       <td className="whitespace-nowrap px-3 py-3.5">
                         {e.ip ? (
@@ -563,7 +571,7 @@ export default function Ledger() {
       {formOpen && (
         <Modal
           title={editing ? `编辑台账 · ${editing.name}` : '新增台账'}
-          description="系统名称必填；选择「已申请域名」时必须填写域名。"
+          description="系统名称必填；「是否申请域名」选「是」时必须填写域名，选「否」时不需要填写。"
           onClose={() => !saving && setFormOpen(false)}
           footer={
             <>
@@ -603,6 +611,15 @@ export default function Ledger() {
             />
           </Field>
 
+          <Field label="运维单位" hint="责任单位或运维厂商，例如 信息化办公室 / XX 科技公司；可留空">
+            <input
+              className={inputCls}
+              value={form.ops_unit}
+              onChange={(e) => setForm((f) => ({ ...f, ops_unit: e.target.value }))}
+              placeholder="例如 信息化办公室"
+            />
+          </Field>
+
           <Field label="IP" hint="支持 IPv4 / IPv6，可带掩码；多个用逗号或空格分隔，例如 10.0.0.11, 10.0.0.12">
             <input
               className={`${inputCls} font-mono`}
@@ -622,8 +639,12 @@ export default function Ledger() {
                 noLabel="否"
               />
             </div>
-            <div>
-              <span className="mb-1.5 block text-sm font-medium text-slate-700">是否申请域名</span>
+          </div>
+
+          {/* 域名联动：先选「是」/「否」；选「是」强制填域名，选「否」不允许填 */}
+          <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50/70 px-4 pt-3.5">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <span className="text-sm font-medium text-slate-700">是否申请域名</span>
               <YesNo
                 value={form.domain_applied}
                 onChange={(next) => setForm((f) => ({ ...f, domain_applied: next }))}
@@ -631,26 +652,30 @@ export default function Ledger() {
                 noLabel="否"
               />
             </div>
-          </div>
-
-          {form.domain_applied && (
             <Field
               label="域名"
-              required
-              hint="只填主机名，可带端口，例如 oa.example.com"
-              error={domainMissing && form.domain === '' ? '选择「是」后必须填写域名' : undefined}
+              required={form.domain_applied}
+              hint={
+                form.domain_applied
+                  ? '只填主机名，可带端口，例如 oa.example.com'
+                  : '已选择「否」，不需要填写域名；保存时会清空该条目的域名'
+              }
+              error={form.domain_applied && form.domain === '' ? '选择「是」后必须填写域名' : undefined}
             >
               <input
-                className={`${inputCls} font-mono`}
-                value={form.domain}
+                className={`${inputCls} font-mono ${
+                  form.domain_applied ? '' : 'cursor-not-allowed bg-slate-100 text-slate-400'
+                }`}
+                value={form.domain_applied ? form.domain : ''}
+                disabled={!form.domain_applied}
                 onChange={(e) => {
                   setFormError(null);
                   setForm((f) => ({ ...f, domain: e.target.value }));
                 }}
-                placeholder="oa.example.com"
+                placeholder={form.domain_applied ? 'oa.example.com' : '未申请域名，无需填写'}
               />
             </Field>
-          )}
+          </div>
 
           <Field label="物理机位置" hint="机房 / 机柜 / U 位等，便于现场排查">
             <input

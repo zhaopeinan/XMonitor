@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS systems (
 CREATE TABLE IF NOT EXISTS system_ledgers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
+  ops_unit TEXT NOT NULL DEFAULT '',
   ip TEXT NOT NULL DEFAULT '',
   external_access INTEGER NOT NULL DEFAULT 0,
   domain_applied INTEGER NOT NULL DEFAULT 0,
@@ -215,6 +216,8 @@ for (const sql of [
   "ALTER TABLE sessions ADD COLUMN ip TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
   'ALTER TABLE sessions ADD COLUMN last_seen_at INTEGER',
+  // 台账运维单位（老库补齐）
+  "ALTER TABLE system_ledgers ADD COLUMN ops_unit TEXT NOT NULL DEFAULT ''",
 ]) {
   try {
     db.exec(sql);

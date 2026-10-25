@@ -45,6 +45,7 @@ export interface SystemRow extends SystemInfo {
 export interface LedgerEntry {
   id: number;
   name: string;
+  ops_unit: string;
   ip: string;
   external_access: boolean | number;
   domain_applied: boolean | number;
@@ -60,6 +61,7 @@ export interface LedgerEntry {
 
 export interface LedgerEntryInput {
   name: string;
+  ops_unit?: string;
   ip?: string;
   external_access?: boolean;
   domain_applied?: boolean;

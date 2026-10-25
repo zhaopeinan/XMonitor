@@ -19,6 +19,7 @@ export interface SystemRow {
 export interface SystemLedgerRow {
   id: number;
   name: string;
+  ops_unit: string;
   ip: string;
   external_access: number;
   domain_applied: number;

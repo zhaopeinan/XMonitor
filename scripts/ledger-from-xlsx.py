@@ -8,12 +8,13 @@
 
 清洗规则：
   name            ← A 列，去首尾空白
+  ops_unit        ← C 列「类型」（内部运维 / 外部运维），导入后可在页面上改成具体运维单位
   domain          ← B 列，去协议前缀 / 路径 / 参数 / 井号，转小写（服务端只接受主机名）
   domain_applied  ← 1（有域名即视为已申请域名）
   external_access ← 0（默认未开放外网；如需按「类型」映射请自行调整 EXTERNAL_BY_TYPE）
   ip              ← 主表 E/F 列；缺失时按名称精确匹配右侧映射表（含安全域 IP，逗号分隔）
   location        ← 留空
-  remark          ← 运维类型 / 证书有效期 / IP 来源 / 重复域名说明
+  remark          ← 证书有效期 / IP 来源 / 重复域名说明
 
 用法：
   python3 scripts/ledger-from-xlsx.py reference/域名系统.xlsx [-o payload.json]
@@ -104,7 +105,7 @@ def build_payload(xlsx_path: str) -> list[dict]:
                 ip_source = "表格右侧服务器映射表"
         ip = ", ".join(p for p in ip_parts if p)
 
-        remark_parts = [f"运维类型：{row['type']}", f"证书有效期至 {row['cert_expiry']}"]
+        remark_parts = [f"证书有效期至 {row['cert_expiry']}"]
         if ip and "安全域" in ip_source:
             remark_parts.append(f"IP 含安全域 IP（{ip_source}）")
         elif ip:
@@ -116,6 +117,7 @@ def build_payload(xlsx_path: str) -> list[dict]:
         payload.append(
             {
                 "name": row["name"],
+                "ops_unit": row["type"],
                 "ip": ip,
                 "external_access": EXTERNAL_BY_TYPE.get(row["type"], False),
                 "domain_applied": True,
@@ -142,6 +144,7 @@ def main() -> None:
     print(f"共 {len(payload)} 条，已写入 {args.out}\n")
     for e in payload:
         print(f"[{e['source_row']:>2}] {e['name']}")
+        print(f"     运维单位: {e['ops_unit'] or '（空）'}")
         print(f"     域名: {e['domain']}    IP: {e['ip'] or '（空）'}")
         print(f"     备注: {e['remark']}")
 

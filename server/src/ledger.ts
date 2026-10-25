@@ -89,6 +89,7 @@ function normalizeBool(raw: unknown): boolean {
 
 interface EntryInput {
   name: string;
+  ops_unit: string;
   ip: string;
   external_access: number;
   domain_applied: number;
@@ -149,6 +150,7 @@ function readEntryInput(body: unknown, existing?: SystemLedgerRow): Validated<En
     ok: true,
     value: {
       name,
+      ops_unit: b.ops_unit === undefined && existing ? existing.ops_unit : normalizeText(b.ops_unit, 120),
       ip: ipResult.value,
       external_access: externalAccess,
       domain_applied: domainApplied,
@@ -193,10 +195,22 @@ ledgerRouter.post('/ledger', requirePermission('ledger.manage'), (req, res) => {
   const v = input.value;
   const info = db
     .prepare(
-      `INSERT INTO system_ledgers(name, ip, external_access, domain_applied, domain, location, remark, system_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO system_ledgers(name, ops_unit, ip, external_access, domain_applied, domain, location, remark, system_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(v.name, v.ip, v.external_access, v.domain_applied, v.domain, v.location, v.remark, v.system_id, now, now);
+    .run(
+      v.name,
+      v.ops_unit,
+      v.ip,
+      v.external_access,
+      v.domain_applied,
+      v.domain,
+      v.location,
+      v.remark,
+      v.system_id,
+      now,
+      now,
+    );
   res.status(201).json(getEntry(Number(info.lastInsertRowid)));
 });
 
@@ -209,9 +223,21 @@ ledgerRouter.patch('/ledger/:id', requirePermission('ledger.manage'), (req, res)
   const v = input.value;
   db.prepare(
     `UPDATE system_ledgers
-     SET name = ?, ip = ?, external_access = ?, domain_applied = ?, domain = ?, location = ?, remark = ?, system_id = ?, updated_at = ?
+     SET name = ?, ops_unit = ?, ip = ?, external_access = ?, domain_applied = ?, domain = ?, location = ?, remark = ?, system_id = ?, updated_at = ?
      WHERE id = ?`,
-  ).run(v.name, v.ip, v.external_access, v.domain_applied, v.domain, v.location, v.remark, v.system_id, Date.now(), id);
+  ).run(
+    v.name,
+    v.ops_unit,
+    v.ip,
+    v.external_access,
+    v.domain_applied,
+    v.domain,
+    v.location,
+    v.remark,
+    v.system_id,
+    Date.now(),
+    id,
+  );
   res.json(getEntry(id));
 });
 
