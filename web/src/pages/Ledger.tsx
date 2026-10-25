@@ -5,7 +5,7 @@ import { useConfirm } from '../components/ConfirmDialog';
 import { useAuth } from '../auth';
 import { Card, ErrorBanner, PageHeader, Spinner } from '../components/ui';
 import { Select } from '../components/Select';
-import type { LedgerEntry, SystemInfo } from '../types';
+import type { LedgerEntry, LedgerScanItem, LedgerScanResult, SystemInfo } from '../types';
 import { errMsg, isTruthy } from '../utils';
 
 const inputCls =
@@ -21,29 +21,76 @@ function Modal({
   children,
   onClose,
   footer,
+  size = 'md',
 }: {
   title: string;
-  description?: string;
+  description?: ReactNode;
   children: ReactNode;
   onClose: () => void;
   footer: ReactNode;
+  /** md 用于表单，lg 用于需要并排展示新旧值的批量结果 */
+  size?: 'md' | 'lg';
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4 py-6" onClick={onClose}>
       <div
-        className="flex max-h-full w-full max-w-lg flex-col rounded-2xl border border-slate-200 bg-white shadow-xl"
+        className={`flex max-h-full w-full flex-col rounded-2xl border border-slate-200 bg-white shadow-xl ${
+          size === 'lg' ? 'max-w-3xl' : 'max-w-lg'
+        }`}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
       >
         <div className="border-b border-slate-100 px-6 py-4">
           <h3 className="text-base font-semibold text-slate-900">{title}</h3>
-          {description && <p className="mt-1 text-sm text-slate-500">{description}</p>}
+          {description && <div className="mt-1 text-sm text-slate-500">{description}</div>}
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">{children}</div>
-        <div className="flex justify-end gap-2 border-t border-slate-100 px-6 py-4">{footer}</div>
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 px-6 py-4">{footer}</div>
       </div>
     </div>
+  );
+}
+
+/** 自绘复选框：不使用系统原生控件，勾选态 / 半选态（全选）样式与自绘下拉保持一致 */
+function Checkbox({
+  checked,
+  indeterminate,
+  onChange,
+  disabled,
+  ariaLabel,
+}: {
+  checked: boolean;
+  indeterminate?: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+  ariaLabel: string;
+}) {
+  const on = checked || indeterminate === true;
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={indeterminate ? 'mixed' : checked}
+      aria-label={ariaLabel}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border transition-colors ${
+        on
+          ? 'border-slate-900 bg-slate-900 text-white'
+          : 'border-slate-300 bg-white text-transparent hover:border-slate-500'
+      } ${disabled ? 'cursor-not-allowed opacity-40' : 'cursor-pointer'}`}
+    >
+      {indeterminate ? (
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.4" className="h-3 w-3">
+          <path d="M4 8h8" strokeLinecap="round" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.2" className="h-3 w-3">
+          <path d="M3.5 8.5l3 3 6-6.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+    </button>
   );
 }
 
@@ -121,6 +168,23 @@ function ExternalBadge({ on }: { on: boolean }) {
   );
 }
 
+/** 扫描结果每行的状态标签 */
+const SCAN_STATUS: Record<LedgerScanItem['status'], { label: string; cls: string }> = {
+  fill: { label: '可补 IP', cls: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
+  change: { label: '与已有 IP 不同', cls: 'border-amber-200 bg-amber-50 text-amber-700' },
+  same: { label: '无变化', cls: 'border-slate-200 bg-slate-50 text-slate-500' },
+  skipped: { label: '已跳过', cls: 'border-slate-200 bg-slate-50 text-slate-500' },
+  error: { label: '解析失败', cls: 'border-rose-200 bg-rose-50 text-rose-600' },
+  missing: { label: '条目不存在', cls: 'border-rose-200 bg-rose-50 text-rose-600' },
+};
+
+function scanSummaryText(s: LedgerScanResult['summary']): string {
+  const parts = [`可补 IP ${s.fill} 条`, `与已有 IP 不同 ${s.change} 条`, `无变化 ${s.same} 条`];
+  if (s.skipped > 0) parts.push(`跳过 ${s.skipped} 条`);
+  if (s.failed > 0) parts.push(`失败 ${s.failed} 条`);
+  return `扫描 ${s.total} 条：${parts.join('，')}`;
+}
+
 interface FormState {
   name: string;
   ops_unit: string;
@@ -183,6 +247,13 @@ export default function Ledger() {
   const [resolving, setResolving] = useState(false);
   const [resolveNotice, setResolveNotice] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
+  // 列表批量选择 + 一键 IP 扫描
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState<LedgerScanResult | null>(null);
+  const [scanChecked, setScanChecked] = useState<Set<number>>(new Set());
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -204,6 +275,17 @@ export default function Ledger() {
     const t = setTimeout(() => setNotice(null), 4000);
     return () => clearTimeout(t);
   }, [notice]);
+
+  // 条目被删除或列表刷新后，丢掉已经不在列表里的选中项
+  useEffect(() => {
+    if (!entries) return;
+    const alive = new Set(entries.map((e) => e.id));
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set([...prev].filter((id) => alive.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [entries]);
 
   const markPending = (id: number, on: boolean) =>
     setPendingIds((prev) => {
@@ -247,6 +329,82 @@ export default function Ledger() {
     }
     return c;
   }, [entries]);
+
+  // ---- 列表批量选择 ----
+  const visibleIds = useMemo(() => (filtered ?? []).map((e) => e.id), [filtered]);
+  const selectedVisible = visibleIds.filter((id) => selected.has(id)).length;
+  const allVisibleSelected = visibleIds.length > 0 && selectedVisible === visibleIds.length;
+  const someVisibleSelected = selectedVisible > 0 && !allVisibleSelected;
+
+  const toggleSelected = (id: number, next: boolean) =>
+    setSelected((prev) => {
+      const set = new Set(prev);
+      if (next) set.add(id);
+      else set.delete(id);
+      return set;
+    });
+
+  /** 全选 / 取消全选：作用于当前筛选出来的列表 */
+  const toggleAllVisible = (next: boolean) =>
+    setSelected((prev) => {
+      const set = new Set(prev);
+      for (const id of visibleIds) {
+        if (next) set.add(id);
+        else set.delete(id);
+      }
+      return set;
+    });
+
+  /** 扫描弹窗里已勾选、且会覆盖已有 IP 的条数 */
+  const overwriteCount = (scanResult?.results ?? []).filter(
+    (it) => it.status === 'change' && scanChecked.has(it.id),
+  ).length;
+
+  /** 一键 IP 扫描：先按域名批量查 DNS（只读），结果给用户在弹窗里复核后才写回 */
+  const runScan = async () => {
+    if (scanning || selected.size === 0) return;
+    setScanning(true);
+    setScanError(null);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await api.scanLedgerIps([...selected]);
+      setScanResult(r);
+      // 默认只勾「IP 为空」的条目；已有 IP 且与解析结果不同的要用户自己勾，避免冲掉人工登记的地址
+      setScanChecked(new Set(r.results.filter((it) => it.status === 'fill').map((it) => it.id)));
+    } catch (e) {
+      setScanError(errMsg(e));
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  /** 把弹窗里勾选过的解析结果写回台账 */
+  const applyScan = async () => {
+    if (!scanResult || applying) return;
+    const updates = scanResult.results.flatMap((it) =>
+      scanChecked.has(it.id) && it.resolved_ip ? [{ id: it.id, ip: it.resolved_ip }] : [],
+    );
+    if (updates.length === 0) return;
+    setApplying(true);
+    setScanError(null);
+    try {
+      const r = await api.applyLedgerIps(updates);
+      setScanResult(null);
+      setScanChecked(new Set());
+      setSelected(new Set());
+      setNotice(
+        `已按扫描结果写入 ${r.updated} 条台账的 IP${
+          r.missing.length > 0 ? `；${r.missing.length} 条已不存在，未写入` : ''
+        }`,
+      );
+      await load();
+    } catch (e) {
+      setScanError(errMsg(e));
+    } finally {
+      setApplying(false);
+    }
+  };
 
   const openCreate = () => {
     setEditing(null);
@@ -473,6 +631,58 @@ export default function Ledger() {
           </div>
         </div>
 
+        {/* 批量操作条：勾选若干条或全选，一键按域名查 DNS 并回填 IP */}
+        {canWrite && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-100 bg-slate-50/60 px-5 py-2.5">
+            <Checkbox
+              checked={allVisibleSelected}
+              indeterminate={someVisibleSelected}
+              disabled={visibleIds.length === 0}
+              onChange={(next) => toggleAllVisible(next)}
+              ariaLabel="全选当前列表"
+            />
+            <button
+              type="button"
+              disabled={visibleIds.length === 0}
+              onClick={() => toggleAllVisible(!allVisibleSelected)}
+              className="text-xs font-medium text-slate-600 transition-colors hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              全选
+            </button>
+            {selected.size > 0 ? (
+              <>
+                <span className="text-xs text-slate-500">
+                  已选 {selected.size} 条
+                  {selectedVisible !== selected.size ? `（当前列表内 ${selectedVisible} 条）` : ''}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelected(new Set())}
+                  className="text-xs font-medium text-slate-400 transition-colors hover:text-slate-700"
+                >
+                  清空选择
+                </button>
+              </>
+            ) : (
+              <span className="text-xs text-slate-400">勾选条目后可批量查 DNS 并回填 IP</span>
+            )}
+            <div className="ml-auto flex flex-wrap items-center gap-3">
+              <span className="hidden text-[11px] text-slate-400 sm:inline">
+                扫描只查 DNS、不改数据，结果确认后才写入
+              </span>
+              <button
+                type="button"
+                disabled={selected.size === 0 || scanning}
+                onClick={() => void runScan()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {scanning && <Spinner className="h-3.5 w-3.5 border-white/40 border-t-white" />}
+                {scanning ? '扫描中…' : '一键 IP 扫描'}
+              </button>
+            </div>
+          </div>
+        )}
+
         {!filtered ? (
           <div className="flex items-center justify-center gap-2 py-12 text-sm text-slate-400">
             <Spinner /> 加载中…
@@ -499,10 +709,21 @@ export default function Ledger() {
         ) : (
           <div className="overflow-x-auto">
             {/* 列较多，给表格一个最小宽度：窄屏时横向滚动，避免列被压成逐字换行 */}
-            <table className="w-full min-w-[1080px] text-sm">
+            <table className="w-full min-w-[1140px] text-sm">
               <thead>
                 <tr className="whitespace-nowrap border-b border-slate-100 bg-slate-50/80 text-left text-xs text-slate-400">
-                  <th className="px-5 py-3 font-medium">系统名称</th>
+                  {canWrite && (
+                    <th className="w-10 py-3 pl-5 pr-0 font-medium">
+                      <Checkbox
+                        checked={allVisibleSelected}
+                        indeterminate={someVisibleSelected}
+                        disabled={visibleIds.length === 0}
+                        onChange={(next) => toggleAllVisible(next)}
+                        ariaLabel="全选当前列表"
+                      />
+                    </th>
+                  )}
+                  <th className={`py-3 font-medium ${canWrite ? 'pl-2 pr-3' : 'px-5'}`}>系统名称</th>
                   <th className="px-3 py-3 font-medium">运维单位</th>
                   <th className="px-3 py-3 font-medium">IP</th>
                   <th className="px-3 py-3 font-medium">外网访问</th>
@@ -521,9 +742,24 @@ export default function Ledger() {
               <tbody>
                 {filtered.map((e) => {
                   const busy = pendingIds.has(e.id);
+                  const picked = selected.has(e.id);
                   return (
-                    <tr key={e.id} className="group border-b border-slate-50 last:border-0 hover:bg-slate-50">
-                      <td className="whitespace-nowrap px-5 py-3.5">
+                    <tr
+                      key={e.id}
+                      className={`group border-b border-slate-50 last:border-0 ${
+                        picked ? 'bg-indigo-50 hover:bg-indigo-100/70' : 'hover:bg-slate-50'
+                      }`}
+                    >
+                      {canWrite && (
+                        <td className="py-3.5 pl-5 pr-0">
+                          <Checkbox
+                            checked={picked}
+                            onChange={(next) => toggleSelected(e.id, next)}
+                            ariaLabel={`选择「${e.name}」`}
+                          />
+                        </td>
+                      )}
+                      <td className={`whitespace-nowrap py-3.5 ${canWrite ? 'pl-2 pr-3' : 'px-5'}`}>
                         <span className="font-medium text-slate-900">{e.name}</span>
                       </td>
                       <td className="whitespace-nowrap px-3 py-3.5 text-slate-600">
@@ -584,7 +820,11 @@ export default function Ledger() {
                         )}
                       </td>
                       {canWrite && (
-                        <td className="sticky right-0 z-10 whitespace-nowrap border-l border-slate-100 bg-white px-5 py-3.5 text-right shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.18)] group-hover:bg-slate-50">
+                        <td
+                          className={`sticky right-0 z-10 whitespace-nowrap border-l border-slate-100 px-5 py-3.5 text-right shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.18)] ${
+                            picked ? 'bg-indigo-50' : 'bg-white group-hover:bg-slate-50'
+                          }`}
+                        >
                           <div className="flex items-center justify-end gap-1">
                             <button
                               type="button"
@@ -783,6 +1023,130 @@ export default function Ledger() {
               placeholder="负责人、开通时间、特殊说明等"
             />
           </Field>
+        </Modal>
+      )}
+
+      {/* 一键 IP 扫描结果：先复核新旧 IP，勾选后才写回台账 */}
+      {scanResult && (
+        <Modal
+          title="一键 IP 扫描结果"
+          description={
+            <>
+              <p>{scanSummaryText(scanResult.summary)}</p>
+              <p className="mt-1 text-xs text-slate-400">
+                这次扫描只查了 DNS，还没有改动台账。勾选下方要写入的条目，再点「写入台账」。
+              </p>
+            </>
+          }
+          size="lg"
+          onClose={() => !applying && setScanResult(null)}
+          footer={
+            <>
+              <span className="mr-auto text-xs text-slate-500">
+                {scanChecked.size > 0
+                  ? `将写入 ${scanChecked.size} 条${overwriteCount > 0 ? `（其中覆盖已有 IP ${overwriteCount} 条）` : ''}`
+                  : '勾选要写入的条目'}
+              </span>
+              <button
+                type="button"
+                disabled={applying}
+                onClick={() => setScanResult(null)}
+                className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+              >
+                关闭
+              </button>
+              <button
+                type="button"
+                disabled={applying || scanChecked.size === 0}
+                onClick={() => void applyScan()}
+                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-40"
+              >
+                {applying && <Spinner className="border-white/40 border-t-white" />}
+                写入台账
+              </button>
+            </>
+          }
+        >
+          {scanError && (
+            <div className="mb-4">
+              <ErrorBanner message={scanError} />
+            </div>
+          )}
+
+          {scanResult.summary.change > 0 && (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs leading-relaxed text-amber-700">
+              有 {scanResult.summary.change} 条记录的已有 IP 与解析结果不同（常见于台账登记内网地址、DNS 返回公网地址），
+              这些条目默认不勾选；确认要改的再手动勾上，避免一键冲掉人工维护的地址。
+            </div>
+          )}
+
+          {scanResult.results.length === 0 ? (
+            <p className="py-6 text-center text-sm text-slate-400">没有可扫描的条目</p>
+          ) : (
+            <div className="space-y-2">
+              {scanResult.results.map((it) => {
+                const writable = (it.status === 'fill' || it.status === 'change') && it.resolved_ip !== null;
+                const checked = scanChecked.has(it.id);
+                const badge = SCAN_STATUS[it.status];
+                return (
+                  <div
+                    key={it.id}
+                    className={`flex items-start gap-3 rounded-xl border px-3.5 py-2.5 ${
+                      checked ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200'
+                    }`}
+                  >
+                    <span className="pt-1">
+                      <Checkbox
+                        checked={checked}
+                        disabled={!writable}
+                        onChange={(next) =>
+                          setScanChecked((prev) => {
+                            const set = new Set(prev);
+                            if (next) set.add(it.id);
+                            else set.delete(it.id);
+                            return set;
+                          })
+                        }
+                        ariaLabel={`写入「${it.name}」的 IP`}
+                      />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="text-sm font-medium text-slate-900">{it.name}</span>
+                        {it.domain && <span className="font-mono text-xs text-slate-500">{it.domain}</span>}
+                        <span
+                          className={`ml-auto inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${badge.cls}`}
+                        >
+                          {badge.label}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                        <span className="text-slate-400">当前 IP</span>
+                        <span className={`font-mono ${it.current_ip ? 'text-slate-600' : 'text-slate-300'}`}>
+                          {it.current_ip || '空'}
+                        </span>
+                        <span className="text-slate-300">→</span>
+                        <span className="text-slate-400">解析</span>
+                        <span
+                          className={`font-mono ${it.resolved_ip ? 'font-medium text-slate-900' : 'text-slate-300'}`}
+                        >
+                          {it.resolved_ip ?? '—'}
+                        </span>
+                        {it.elapsed_ms > 0 && <span className="text-slate-400">{it.elapsed_ms}ms</span>}
+                      </div>
+                      {it.addresses.length > 1 && (
+                        <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                          DNS 共返回 {it.addresses.length} 个地址：
+                          {it.addresses.map((a) => a.address).join('、')}，默认写入第一个；其余需要时手动补进 IP
+                        </p>
+                      )}
+                      {it.message && <p className="mt-1 text-[11px] text-slate-500">{it.message}</p>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </Modal>
       )}
     </div>

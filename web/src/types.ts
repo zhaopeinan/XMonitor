@@ -79,6 +79,28 @@ export interface DomainResolveResult {
   elapsed_ms: number;
 }
 
+/** 「一键 IP 扫描」单条结果的状态 */
+export type LedgerScanStatus = 'fill' | 'change' | 'same' | 'skipped' | 'error' | 'missing';
+
+export interface LedgerScanItem {
+  id: number;
+  name: string;
+  domain: string;
+  host: string | null;
+  current_ip: string;
+  resolved_ip: string | null;
+  addresses: { address: string; family: number }[];
+  status: LedgerScanStatus;
+  message: string | null;
+  elapsed_ms: number;
+}
+
+/** 「一键 IP 扫描」的批量结果：results 逐条给出新旧 IP 对比，summary 是各类计数 */
+export interface LedgerScanResult {
+  results: LedgerScanItem[];
+  summary: { total: number; fill: number; change: number; same: number; skipped: number; failed: number };
+}
+
 export interface SystemSummary extends SystemInfo {
   overall_status: MonitorStatus | string | null;
   reverse_count?: number;

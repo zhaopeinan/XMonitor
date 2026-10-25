@@ -322,3 +322,179 @@ ledgerRouter.post('/ledger/resolve-domain', requirePermission('ledger.manage'), 
     res.status(code === 'ETIMEOUT' ? 504 : 400).json({ error: dnsErrorText(code, host) });
   }
 });
+
+// ---- 一键 IP 扫描：批量按域名查 DNS，确认后再写回 IP ----
+
+/** 一次扫描 / 写入的条目上限，避免一个请求里排太多 DNS 查询 */
+const SCAN_MAX_IDS = 500;
+/** DNS 查询并发数：比串行快，又不至于把内网 DNS 打爆 */
+const SCAN_CONCURRENCY = 8;
+
+/**
+ * 单条扫描结果的状态：
+ * fill=IP 为空可补上、change=与已有 IP 不同、same=与已有 IP 一致、
+ * skipped=没有可解析的域名、error=解析失败、missing=条目已被删除
+ */
+type ScanStatus = 'fill' | 'change' | 'same' | 'skipped' | 'error' | 'missing';
+
+interface ScanResultItem {
+  id: number;
+  name: string;
+  domain: string;
+  host: string | null;
+  current_ip: string;
+  resolved_ip: string | null;
+  addresses: ResolvedAddress[];
+  status: ScanStatus;
+  message: string | null;
+  elapsed_ms: number;
+}
+
+/** 按并发上限批量执行异步任务，结果顺序与入参一致 */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/** 解析一条台账的域名：只查 DNS，不碰数据库，是否写回由调用方决定 */
+async function scanEntry(row: SystemLedgerRow): Promise<ScanResultItem> {
+  const base: ScanResultItem = {
+    id: row.id,
+    name: row.name,
+    domain: row.domain,
+    host: null,
+    current_ip: row.ip,
+    resolved_ip: null,
+    addresses: [],
+    status: 'skipped',
+    message: null,
+    elapsed_ms: 0,
+  };
+  if (!row.domain) return { ...base, message: '未填写域名' };
+  if (!normalizeBool(row.domain_applied)) return { ...base, message: '未申请域名' };
+
+  const { host, wildcard } = hostFromDomain(row.domain);
+  if (wildcard) return { ...base, host, message: '通配符域名（*. 开头）不能直接解析' };
+
+  const started = Date.now();
+  try {
+    const addresses = await lookupHost(host);
+    const elapsed = Date.now() - started;
+    if (addresses.length === 0) {
+      return { ...base, host, status: 'error', message: `DNS 没有返回 ${host} 的地址记录`, elapsed_ms: elapsed };
+    }
+    // IPv4 排前面，取第一个作为待写入的 IP
+    addresses.sort((a, b) => a.family - b.family);
+    const resolvedIp = addresses[0].address;
+    const currentIp = row.ip.trim();
+    const status: ScanStatus = !currentIp ? 'fill' : currentIp === resolvedIp ? 'same' : 'change';
+    return { ...base, host, addresses, resolved_ip: resolvedIp, status, elapsed_ms: elapsed };
+  } catch (e) {
+    return {
+      ...base,
+      host,
+      status: 'error',
+      message: dnsErrorText((e as NodeJS.ErrnoException).code, host),
+      elapsed_ms: Date.now() - started,
+    };
+  }
+}
+
+/** 批量按域名查 DNS（只读）。前端拿结果给用户复核，确认后再调 apply 写回 */
+ledgerRouter.post('/ledger/scan-ips', requirePermission('ledger.manage'), async (req, res) => {
+  const raw = (req.body ?? {}) as { ids?: unknown };
+  if (!Array.isArray(raw.ids) || raw.ids.length === 0) {
+    return res.status(400).json({ error: '请先勾选要扫描的台账条目' });
+  }
+  if (raw.ids.length > SCAN_MAX_IDS) {
+    return res.status(400).json({ error: `一次最多扫描 ${SCAN_MAX_IDS} 条` });
+  }
+  const ids: number[] = [];
+  for (const value of raw.ids) {
+    const id = Number(value);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'ids 里含有不合法的条目 ID' });
+    if (!ids.includes(id)) ids.push(id);
+  }
+
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = db
+    .prepare(`SELECT * FROM system_ledgers WHERE id IN (${placeholders})`)
+    .all(...ids) as SystemLedgerRow[];
+  const byId = new Map(rows.map((row) => [row.id, row]));
+
+  const results = await mapLimit(ids, SCAN_CONCURRENCY, async (id): Promise<ScanResultItem> => {
+    const row = byId.get(id);
+    if (!row) {
+      return {
+        id,
+        name: `#${id}`,
+        domain: '',
+        host: null,
+        current_ip: '',
+        resolved_ip: null,
+        addresses: [],
+        status: 'missing',
+        message: '条目已不存在（可能刚被删除）',
+        elapsed_ms: 0,
+      };
+    }
+    return scanEntry(row);
+  });
+
+  const summary = { total: results.length, fill: 0, change: 0, same: 0, skipped: 0, failed: 0 };
+  for (const item of results) {
+    if (item.status === 'fill') summary.fill += 1;
+    else if (item.status === 'change') summary.change += 1;
+    else if (item.status === 'same') summary.same += 1;
+    else if (item.status === 'skipped') summary.skipped += 1;
+    else summary.failed += 1;
+  }
+  res.json({ results, summary });
+});
+
+/** 把扫描结果里用户勾选过的 IP 写回台账 */
+ledgerRouter.post('/ledger/scan-ips/apply', requirePermission('ledger.manage'), (req, res) => {
+  const raw = (req.body ?? {}) as { updates?: unknown };
+  if (!Array.isArray(raw.updates) || raw.updates.length === 0) {
+    return res.status(400).json({ error: '没有要写入的条目' });
+  }
+  if (raw.updates.length > SCAN_MAX_IDS) {
+    return res.status(400).json({ error: `一次最多写入 ${SCAN_MAX_IDS} 条` });
+  }
+
+  const updates: { id: number; ip: string }[] = [];
+  for (const value of raw.updates) {
+    const item = (value ?? {}) as { id?: unknown; ip?: unknown };
+    const id = Number(item.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: '条目 ID 不合法' });
+    const ipResult = normalizeIp(item.ip);
+    if (!ipResult.ok) return res.status(400).json({ error: ipResult.error });
+    if (!ipResult.value) return res.status(400).json({ error: '写入的 IP 不能为空' });
+    updates.push({ id, ip: ipResult.value });
+  }
+
+  const now = Date.now();
+  const statement = db.prepare('UPDATE system_ledgers SET ip = ?, updated_at = ? WHERE id = ?');
+  let updated = 0;
+  const missing: number[] = [];
+  const applyAll = db.transaction((rows: { id: number; ip: string }[]) => {
+    for (const row of rows) {
+      const info = statement.run(row.ip, now, row.id);
+      if (info.changes > 0) updated += 1;
+      else missing.push(row.id);
+    }
+  });
+  applyAll(updates);
+
+  res.json({ updated, missing });
+});

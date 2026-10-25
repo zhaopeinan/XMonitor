@@ -9,6 +9,7 @@ import type {
   DomainResolveResult,
   LedgerEntry,
   LedgerEntryInput,
+  LedgerScanResult,
   LlmChannel,
   LlmModel,
   LlmProfile,
@@ -141,6 +142,9 @@ export const api = {
   deleteLedgerEntry: (id: number) => request<unknown>(`/api/ledger/${id}`, { method: 'DELETE' }),
   resolveLedgerDomain: (domain: string) =>
     post<DomainResolveResult>('/api/ledger/resolve-domain', { domain }),
+  scanLedgerIps: (ids: number[]) => post<LedgerScanResult>('/api/ledger/scan-ips', { ids }),
+  applyLedgerIps: (updates: { id: number; ip: string }[]) =>
+    post<{ updated: number; missing: number[] }>('/api/ledger/scan-ips/apply', { updates }),
 
   getSettings: () => request<SettingsMap>('/api/settings'),
   putSettings: (settings: SettingsMap) =>
