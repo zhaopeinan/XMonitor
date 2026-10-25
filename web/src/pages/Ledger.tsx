@@ -286,6 +286,20 @@ export default function Ledger() {
         setResolveError('DNS 没有返回地址记录');
         return;
       }
+      // 已有 IP 且与解析结果不同：先确认，避免覆盖人工维护的地址
+      const current = form.ip.trim();
+      if (current && current !== first.address) {
+        const accepted = await confirm({
+          title: '替换已有 IP？',
+          message: `${domain} 解析到 ${first.address}，当前 IP 是「${current}」。\n确认后会用解析结果覆盖 IP 字段。`,
+          confirmText: '替换 IP',
+          cancelText: '保留原值',
+        });
+        if (!accepted) {
+          setResolveNotice(`解析到 ${first.address}，已按你的选择保留原 IP`);
+          return;
+        }
+      }
       setForm((f) => ({ ...f, ip: first.address }));
       const rest = r.addresses.slice(1).filter((a) => a.address !== first.address);
       const more = rest.length > 0 ? `；另有 ${rest.map((a) => a.address).join('、')}，需要时手动补进 IP` : '';
