@@ -294,7 +294,7 @@ export default function Ledger() {
   const [resolving, setResolving] = useState(false);
   const [resolveNotice, setResolveNotice] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
-  // 列表批量选择 + 一键 IP 扫描
+  // 列表批量选择 + IP 扫描 / OS 扫描
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<LedgerScanResult | null>(null);
@@ -424,7 +424,7 @@ export default function Ledger() {
     [scanResult],
   );
 
-  /** 一键 IP 扫描：先按域名批量查 DNS（只读），结果给用户在弹窗里复核后才写回 */
+  /** IP 扫描：先按域名批量查 DNS（只读），结果给用户在弹窗里复核后才写回 */
   const runScan = async () => {
     if (scanning || selected.size === 0) return;
     setScanning(true);
@@ -485,7 +485,7 @@ export default function Ledger() {
     [osResult],
   );
 
-  /** 操作系统探测：按 IP 连端口读横幅（只读），结果给用户在弹窗里复核后才写回 */
+  /** OS 扫描：按 IP 连端口读横幅（只读），结果给用户在弹窗里复核后才写回 */
   const runOsProbe = async () => {
     if (probing || selected.size === 0) return;
     setProbing(true);
@@ -767,7 +767,7 @@ export default function Ledger() {
           </div>
         </div>
 
-        {/* 批量操作条：勾选若干条或全选，一键按域名查 DNS 并回填 IP */}
+        {/* 批量操作条：勾选若干条或全选，按域名批量查 DNS 回填 IP，或按端口指纹识别操作系统 */}
         {canWrite && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-100 bg-slate-50/60 px-5 py-2.5">
             <Checkbox
@@ -800,7 +800,9 @@ export default function Ledger() {
                 </button>
               </>
             ) : (
-              <span className="text-xs text-slate-400">勾选条目后可批量查 DNS 回填 IP，或探测服务器操作系统</span>
+              <span className="text-xs text-slate-400">
+                勾选条目后可批量查 DNS 回填 IP（IP 扫描），或连端口读服务横幅识别操作系统（OS 扫描）
+              </span>
             )}
             <div className="ml-auto flex flex-wrap items-center gap-3">
               <span className="hidden text-[11px] text-slate-400 sm:inline">
@@ -813,7 +815,7 @@ export default function Ledger() {
                 className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {probing && <Spinner className="h-3.5 w-3.5" />}
-                {probing ? '探测中…' : '操作系统探测'}
+                {probing ? '扫描中…' : 'OS 扫描'}
               </button>
               <button
                 type="button"
@@ -822,7 +824,7 @@ export default function Ledger() {
                 className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {scanning && <Spinner className="h-3.5 w-3.5 border-white/40 border-t-white" />}
-                {scanning ? '扫描中…' : '一键 IP 扫描'}
+                {scanning ? '扫描中…' : 'IP 扫描'}
               </button>
             </div>
           </div>
@@ -1100,7 +1102,7 @@ export default function Ledger() {
 
           <Field
             label="操作系统"
-            hint="人工登记，或勾选条目后点「操作系统探测」按 IP 探测后写入；探测依据与时间会随条目保存"
+            hint="人工登记，或勾选条目后点「OS 扫描」按 IP 探测后写入；探测依据与时间会随条目保存"
           >
             <input
               className={inputCls}
@@ -1207,10 +1209,10 @@ export default function Ledger() {
         </Modal>
       )}
 
-      {/* 一键 IP 扫描结果：先复核新旧 IP，勾选后才写回台账 */}
+      {/* IP 扫描结果：先复核新旧 IP，勾选后才写回台账 */}
       {scanResult && (
         <Modal
-          title="一键 IP 扫描结果"
+          title="IP 扫描结果"
           description={
             <>
               <p>{scanSummaryText(scanResult.summary)}</p>
@@ -1368,10 +1370,10 @@ export default function Ledger() {
         </Modal>
       )}
 
-      {/* 操作系统探测结果：先复核结论与依据，勾选后才写回台账 */}
+      {/* OS 扫描结果：先复核结论与依据，勾选后才写回台账 */}
       {osResult && (
         <Modal
-          title="操作系统探测结果"
+          title="OS 扫描结果"
           description={
             <>
               <p>{osSummaryText(osResult.summary)}</p>

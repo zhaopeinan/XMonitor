@@ -591,7 +591,7 @@ async function probeEntry(row: SystemLedgerRow): Promise<OsProbeItem> {
 
   const target = probeTargetFromIp(row.ip ?? '');
   if (!target) {
-    return { ...base, message: '没有可探测的 IP：先在 IP 字段填地址，或用「一键 IP 扫描」按域名补上' };
+    return { ...base, message: '没有可探测的 IP：先在 IP 字段填地址，或用「IP 扫描」按域名补上' };
   }
 
   const { host } = row.domain ? hostFromDomain(row.domain) : { host: '' };
