@@ -5,8 +5,25 @@ import { useConfirm } from '../components/ConfirmDialog';
 import { useAuth } from '../auth';
 import { Card, ErrorBanner, PageHeader, Spinner } from '../components/ui';
 import { Select } from '../components/Select';
-import type { LedgerEntry, LedgerScanItem, LedgerScanResult, SystemInfo } from '../types';
-import { errMsg, isInternalAddress, isTruthy } from '../utils';
+import type {
+  LedgerEntry,
+  LedgerHttpsProbeItem,
+  LedgerHttpsProbeResult,
+  LedgerScanItem,
+  LedgerScanResult,
+  LedgerScanStatus,
+  SystemInfo,
+} from '../types';
+import {
+  certBadge,
+  certDaysLeft,
+  errMsg,
+  fmtDateTime,
+  fmtDay,
+  httpsOutcomeLabel,
+  isInternalAddress,
+  isTruthy,
+} from '../utils';
 
 const inputCls =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 placeholder-slate-400 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200';
@@ -189,6 +206,36 @@ function scanSummaryText(s: LedgerScanResult['summary']): string {
   return `扫描 ${s.total} 条：${parts.join('，')}`;
 }
 
+/** HTTPS / 证书探测结果每行的状态标签 */
+const HTTPS_STATUS: Record<LedgerScanStatus, { label: string; cls: string }> = {
+  fill: { label: '可补结论', cls: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
+  change: { label: '结论有变化', cls: 'border-amber-200 bg-amber-50 text-amber-700' },
+  same: { label: '无变化', cls: 'border-slate-200 bg-slate-50 text-slate-500' },
+  skipped: { label: '缺少地址', cls: 'border-slate-200 bg-slate-50 text-slate-500' },
+  error: { label: '没有探到', cls: 'border-rose-200 bg-rose-50 text-rose-600' },
+  missing: { label: '条目不存在', cls: 'border-rose-200 bg-rose-50 text-rose-600' },
+};
+
+function httpsSummaryText(s: LedgerHttpsProbeResult['summary']): string {
+  const parts = [`支持 HTTPS ${s.yes} 条`, `仅 HTTP ${s.no} 条`, `未探到 ${s.unknown} 条`];
+  if (s.expired > 0) parts.push(`证书已过期 ${s.expired} 条`);
+  if (s.expiring > 0) parts.push(`30 天内到期 ${s.expiring} 条`);
+  return `探测 ${s.total} 条：${parts.join('，')}`;
+}
+
+/** 证书剩余天数的文案（不带「证书」二字，调用处自己拼） */
+function certDaysText(daysLeft: number | null): string {
+  if (daysLeft === null) return '';
+  return daysLeft < 0 ? `已过期 ${Math.abs(daysLeft)} 天` : `剩 ${daysLeft} 天`;
+}
+
+/** 证书剩余天数的标签配色：已过期红、30 天内黄、其余绿 */
+function certDaysCls(daysLeft: number): string {
+  if (daysLeft < 0) return 'border-rose-200 bg-rose-50 text-rose-600';
+  if (daysLeft <= 30) return 'border-amber-200 bg-amber-50 text-amber-700';
+  return 'border-emerald-200 bg-emerald-50 text-emerald-700';
+}
+
 interface FormState {
   name: string;
   ops_unit: string;
@@ -258,6 +305,12 @@ export default function Ledger() {
   const [scanChecked, setScanChecked] = useState<Set<number>>(new Set());
   const [scanError, setScanError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
+  // HTTPS / 证书探测
+  const [probing, setProbing] = useState(false);
+  const [probeResult, setProbeResult] = useState<LedgerHttpsProbeResult | null>(null);
+  const [probeChecked, setProbeChecked] = useState<Set<number>>(new Set());
+  const [probeError, setProbeError] = useState<string | null>(null);
+  const [probeApplying, setProbeApplying] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -417,6 +470,79 @@ export default function Ledger() {
       setScanError(errMsg(e));
     } finally {
       setApplying(false);
+    }
+  };
+
+  /** HTTPS 探测结果里可写入的条目：探到结论的，或「探测过但没探到」（后者默认不勾，可手动勾来留档） */
+  const probeWritable = (it: LedgerHttpsProbeItem) =>
+    it.status === 'fill' || it.status === 'change' || it.https === 'unknown';
+
+  const probeFillIds = useMemo(
+    () => (probeResult?.results ?? []).filter((it) => it.status === 'fill').map((it) => it.id),
+    [probeResult],
+  );
+  const probeChangeIds = useMemo(
+    () => (probeResult?.results ?? []).filter((it) => it.status === 'change').map((it) => it.id),
+    [probeResult],
+  );
+  const probeUnknownIds = useMemo(
+    () => (probeResult?.results ?? []).filter((it) => it.status === 'error').map((it) => it.id),
+    [probeResult],
+  );
+
+  /** HTTPS / 证书探测：只做 TLS 握手与 HTTP 跳转检查（只读），结果复核后才写回 */
+  const runProbe = async () => {
+    if (probing || selected.size === 0) return;
+    setProbing(true);
+    setProbeError(null);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await api.probeLedgerHttps([...selected]);
+      setProbeResult(r);
+      // 默认只勾还没结论的条目；已有结论的改动要用户自己勾，避免覆盖掉核对过的结论
+      setProbeChecked(new Set(r.results.filter((it) => it.status === 'fill').map((it) => it.id)));
+    } catch (e) {
+      setProbeError(errMsg(e));
+    } finally {
+      setProbing(false);
+    }
+  };
+
+  /** 把弹窗里勾选过的探测结论与依据写回台账 */
+  const applyProbe = async () => {
+    if (!probeResult || probeApplying) return;
+    const updates = probeResult.results.flatMap((it) =>
+      probeChecked.has(it.id) && it.https
+        ? [
+            {
+              id: it.id,
+              https: it.https,
+              expires_at: it.cert?.validTo ?? null,
+              target: it.target ?? '',
+              lines: it.evidence,
+            },
+          ]
+        : [],
+    );
+    if (updates.length === 0) return;
+    setProbeApplying(true);
+    setProbeError(null);
+    try {
+      const r = await api.applyLedgerHttps(updates);
+      setProbeResult(null);
+      setProbeChecked(new Set());
+      setSelected(new Set());
+      setNotice(
+        `已写入 ${r.updated} 条台账的 HTTPS / 证书结论${
+          r.missing.length > 0 ? `；${r.missing.length} 条已不存在，未写入` : ''
+        }`,
+      );
+      await load();
+    } catch (e) {
+      setProbeError(errMsg(e));
+    } finally {
+      setProbeApplying(false);
     }
   };
 
@@ -645,7 +771,7 @@ export default function Ledger() {
           </div>
         </div>
 
-        {/* 批量操作条：勾选若干条或全选，一键按域名查 DNS 并回填 IP */}
+        {/* 批量操作条：勾选若干条或全选，一键按域名查 DNS 回填 IP，或探测 HTTPS 与证书 */}
         {canWrite && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-100 bg-slate-50/60 px-5 py-2.5">
             <Checkbox
@@ -678,15 +804,24 @@ export default function Ledger() {
                 </button>
               </>
             ) : (
-              <span className="text-xs text-slate-400">勾选条目后可批量查 DNS 回填 IP</span>
+              <span className="text-xs text-slate-400">勾选条目后可批量查 DNS 回填 IP，或探测 HTTPS 与证书有效期</span>
             )}
             <div className="ml-auto flex flex-wrap items-center gap-3">
               <span className="hidden text-[11px] text-slate-400 sm:inline">
-                扫描只查 DNS、不改数据，结果确认后才写入
+                两次操作都只读网络、不改数据，结果确认后才写入
               </span>
               <button
                 type="button"
-                disabled={selected.size === 0 || scanning}
+                disabled={selected.size === 0 || probing}
+                onClick={() => void runProbe()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {probing && <Spinner className="h-3.5 w-3.5" />}
+                {probing ? '探测中…' : 'HTTPS 探测'}
+              </button>
+              <button
+                type="button"
+                disabled={selected.size === 0 || scanning || probing}
                 onClick={() => void runScan()}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -723,7 +858,7 @@ export default function Ledger() {
         ) : (
           <div className="overflow-x-auto">
             {/* 列较多，给表格一个最小宽度：窄屏时横向滚动，避免列被压成逐字换行 */}
-            <table className="w-full min-w-[1260px] text-sm">
+            <table className="w-full min-w-[1360px] text-sm">
               <thead>
                 <tr className="whitespace-nowrap border-b border-slate-100 bg-slate-50/80 text-left text-xs text-slate-400">
                   {canWrite && (
@@ -742,6 +877,7 @@ export default function Ledger() {
                   <th className="px-3 py-3 font-medium">IP</th>
                   <th className="px-3 py-3 font-medium">外网访问</th>
                   <th className="px-3 py-3 font-medium">域名</th>
+                  <th className="px-3 py-3 font-medium">HTTPS / 证书</th>
                   <th className="px-3 py-3 font-medium">物理机位置</th>
                   <th className="px-3 py-3 font-medium">关联监控</th>
                   <th className="px-3 py-3 font-medium">备注</th>
@@ -757,6 +893,13 @@ export default function Ledger() {
                 {filtered.map((e) => {
                   const busy = pendingIds.has(e.id);
                   const picked = selected.has(e.id);
+                  // HTTPS / 证书列：有证书有效期就先说还能用多久，否则退回探测结论
+                  const cert = certBadge(e);
+                  const certTitle = e.https_checked_at
+                    ? `最近探测 ${fmtDateTime(e.https_checked_at)} · ${httpsOutcomeLabel(e.https_supported)}${
+                        e.cert_expires_at ? ` · 证书 ${fmtDay(e.cert_expires_at)} 到期` : ''
+                      }`
+                    : '还没探测过：勾选后点「HTTPS 探测」';
                   return (
                     <tr
                       key={e.id}
@@ -807,6 +950,14 @@ export default function Ledger() {
                             未申请
                           </span>
                         )}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3.5">
+                        <span
+                          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${cert.cls}`}
+                          title={certTitle}
+                        >
+                          {cert.label}
+                        </span>
                       </td>
                       <td className="whitespace-nowrap px-3 py-3.5 text-slate-600">
                         {e.location || <span className="text-slate-300">—</span>}
@@ -1029,6 +1180,37 @@ export default function Ledger() {
             />
           </Field>
 
+          {/* HTTPS / 证书结论只由探测写入，这里只读展示，不参与人工登记 */}
+          {editing && (editing.https_supported !== '' || editing.cert_evidence !== '') && (
+            <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm font-medium text-slate-700">HTTPS / 证书（由探测维护，不能手改）</span>
+                <span className="text-xs text-slate-400">
+                  {editing.https_checked_at ? `最近探测 ${fmtDateTime(editing.https_checked_at)}` : '还没探测过'}
+                </span>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs">
+                <span
+                  className={`inline-flex items-center rounded-full border px-2 py-0.5 font-medium ${
+                    certBadge(editing).cls
+                  }`}
+                >
+                  {httpsOutcomeLabel(editing.https_supported)}
+                </span>
+                {editing.cert_expires_at ? (
+                  <span className="text-slate-500">
+                    证书 {fmtDay(editing.cert_expires_at)} 到期（{certDaysText(certDaysLeft(editing.cert_expires_at))}）
+                  </span>
+                ) : null}
+              </div>
+              {editing.cert_evidence && (
+                <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-slate-500">
+                  {editing.cert_evidence}
+                </pre>
+              )}
+            </div>
+          )}
+
           <Field label="备注">
             <textarea
               className={`${inputCls} min-h-24 resize-y`}
@@ -1192,6 +1374,198 @@ export default function Ledger() {
                         </p>
                       )}
                       {it.message && <p className="mt-1 text-[11px] text-slate-500">{it.message}</p>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {/* HTTPS / 证书探测结果：先复核结论与证书，勾选后才写回台账 */}
+      {probeResult && (
+        <Modal
+          title="HTTPS / 证书探测结果"
+          description={
+            <>
+              <p>{httpsSummaryText(probeResult.summary)}</p>
+              <p className="mt-1 text-xs text-slate-400">
+                这次只做了 TLS 握手与 HTTP 跳转检查，还没有改动台账。勾选下方要写入的条目，再点「写入台账」；
+                写入时探测依据会一起存档。
+              </p>
+            </>
+          }
+          size="lg"
+          onClose={() => !probeApplying && setProbeResult(null)}
+          footer={
+            <>
+              <span className="mr-auto text-xs text-slate-500">
+                {probeChecked.size > 0 ? `将写入 ${probeChecked.size} 条` : '勾选要写入的条目'}
+              </span>
+              <button
+                type="button"
+                disabled={probeApplying}
+                onClick={() => setProbeResult(null)}
+                className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+              >
+                关闭
+              </button>
+              <button
+                type="button"
+                disabled={probeApplying || probeChecked.size === 0}
+                onClick={() => void applyProbe()}
+                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-40"
+              >
+                {probeApplying && <Spinner className="border-white/40 border-t-white" />}
+                写入台账
+              </button>
+            </>
+          }
+        >
+          {probeError && (
+            <div className="mb-4">
+              <ErrorBanner message={probeError} />
+            </div>
+          )}
+
+          {probeResult.results.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className={chipBtnCls}
+                onClick={() => setProbeChecked(new Set(probeFillIds))}
+              >
+                只选还没结论的 ({probeFillIds.length})
+              </button>
+              <button
+                type="button"
+                className={chipBtnCls}
+                disabled={probeChangeIds.length === 0}
+                onClick={() => setProbeChecked((prev) => new Set([...prev, ...probeChangeIds]))}
+              >
+                加上结论变化 ({probeChangeIds.length})
+              </button>
+              <button
+                type="button"
+                className={chipBtnCls}
+                disabled={probeUnknownIds.length === 0}
+                onClick={() => setProbeChecked((prev) => new Set([...prev, ...probeUnknownIds]))}
+              >
+                加上没探到的 ({probeUnknownIds.length})
+              </button>
+              <button
+                type="button"
+                className={chipBtnCls}
+                disabled={probeChecked.size === 0}
+                onClick={() => setProbeChecked(new Set())}
+              >
+                全不选
+              </button>
+              <span className="ml-auto text-xs text-slate-400">已勾选 {probeChecked.size} 条</span>
+            </div>
+          )}
+
+          {probeResult.summary.change > 0 && (
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs leading-relaxed text-amber-700">
+              有 {probeResult.summary.change} 条已有结论与本次探测不同，默认不勾选；确认要改的可以逐条勾，或点上方「加上结论变化」一键纳入。
+              台账的 HTTPS 结论、证书有效期与探测依据完全由探测维护，覆盖不会动到人工登记的字段，所以不留备注痕迹。
+            </div>
+          )}
+
+          {probeResult.results.length === 0 ? (
+            <p className="py-6 text-center text-sm text-slate-400">没有可探测的条目</p>
+          ) : (
+            <div className="space-y-2">
+              {probeResult.results.map((it) => {
+                const writable = probeWritable(it);
+                const checked = probeChecked.has(it.id);
+                const badge = HTTPS_STATUS[it.status];
+                const daysLeft = it.cert?.daysLeft ?? null;
+                const target = it.target ?? (it.domain || it.ip || '没填地址');
+                return (
+                  <div
+                    key={it.id}
+                    className={`flex items-start gap-3 rounded-xl border px-3.5 py-2.5 ${
+                      checked ? 'border-indigo-200 bg-indigo-50/50' : 'border-slate-200'
+                    }`}
+                  >
+                    <span className="pt-1">
+                      <Checkbox
+                        checked={checked}
+                        disabled={!writable}
+                        onChange={(next) =>
+                          setProbeChecked((prev) => {
+                            const set = new Set(prev);
+                            if (next) set.add(it.id);
+                            else set.delete(it.id);
+                            return set;
+                          })
+                        }
+                        ariaLabel={`写入「${it.name}」的 HTTPS 结论`}
+                      />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="text-sm font-medium text-slate-900">{it.name}</span>
+                        <span className="font-mono text-xs text-slate-500">{target}</span>
+                        <span
+                          className={`ml-auto inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${badge.cls}`}
+                        >
+                          {badge.label}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                        <span className="text-slate-400">台账已有</span>
+                        <span className="text-slate-600">
+                          {httpsOutcomeLabel(it.current_supported)}
+                          {it.current_expires_at ? `（到期 ${fmtDay(it.current_expires_at)}）` : ''}
+                        </span>
+                        <span className="text-slate-300">→</span>
+                        <span className="text-slate-400">本次</span>
+                        <span className="font-medium text-slate-900">
+                          {httpsOutcomeLabel(it.https)}
+                          {it.cert?.validTo ? `（到期 ${fmtDay(it.cert.validTo)}）` : ''}
+                        </span>
+                        {daysLeft !== null && (
+                          <span
+                            className={`rounded border px-1.5 py-0.5 text-[11px] font-medium ${certDaysCls(daysLeft)}`}
+                          >
+                            证书{certDaysText(daysLeft)}
+                          </span>
+                        )}
+                        {it.cert && !it.cert.authorized && (
+                          <span
+                            className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700"
+                            title={it.cert.authError ?? undefined}
+                          >
+                            {it.cert.selfSigned ? '自签名证书' : '信任链没通过'}
+                          </span>
+                        )}
+                        {it.elapsed_ms > 0 && <span className="text-slate-400">{it.elapsed_ms}ms</span>}
+                      </div>
+                      {it.cert && (
+                        <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+                          证书 {it.cert.subject || '主体未知'} · 颁发者 {it.cert.issuer || '未知'}
+                          {it.cert.protocol ? ` · ${it.cert.protocol}` : ''}
+                          {it.cert.altNames.length > 0 ? ` · 备用名称 ${it.cert.altNames.slice(0, 4).join('、')}` : ''}
+                        </p>
+                      )}
+                      {it.message && <p className="mt-1 text-[11px] text-slate-500">{it.message}</p>}
+                      {it.evidence.length > 0 && (
+                        <div className="mt-1 space-y-0.5">
+                          {it.evidence.map((line, idx) => (
+                            <p key={idx} className="text-[11px] leading-relaxed text-slate-400">
+                              {line}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+                      {it.status === 'error' && (
+                        <p className="mt-1 text-[11px] text-slate-400">
+                          默认不勾选；勾上会把「未探到」记进台账，用来区分「没探过」和「探了但连不上」
+                        </p>
+                      )}
                     </div>
                   </div>
                 );

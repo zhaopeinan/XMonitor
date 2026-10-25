@@ -32,6 +32,50 @@ export function isInternalAddress(ip?: string | null): boolean {
   return false;
 }
 
+/** 毫秒时间戳 → 2026-11-03：证书到期这类只关心日期的地方用 */
+export function fmtDay(ts?: number | null): string {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '—';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** HTTPS 探测结论的文案：''=还没探测过 */
+export function httpsOutcomeLabel(outcome?: string | null): string {
+  if (outcome === 'yes') return '支持 HTTPS';
+  if (outcome === 'no') return '仅 HTTP';
+  if (outcome === 'unknown') return '未探到';
+  return '未探测';
+}
+
+/** 证书剩余天数（负数表示已过期），按当前时间实时算，不写死在库里 */
+export function certDaysLeft(expiresAt?: number | null): number | null {
+  if (!expiresAt) return null;
+  return Math.floor((expiresAt - Date.now()) / 86_400_000);
+}
+
+/**
+ * 台账列表「HTTPS / 证书」列的标签：有证书有效期就先说还能用多久（已过期红、30 天内黄、其余绿），
+ * 没有证书时退回探测结论；没探测过是灰色的「未探测」，和「探了但没探到」区分开。
+ */
+export function certBadge(entry: {
+  https_supported?: string | null;
+  cert_expires_at?: number | null;
+}): { label: string; cls: string } {
+  const daysLeft = certDaysLeft(entry.cert_expires_at);
+  if (daysLeft !== null) {
+    if (daysLeft < 0) return { label: `已过期 ${Math.abs(daysLeft)} 天`, cls: 'border-rose-200 bg-rose-50 text-rose-600' };
+    if (daysLeft <= 30) return { label: `剩 ${daysLeft} 天`, cls: 'border-amber-200 bg-amber-50 text-amber-700' };
+    return { label: `剩 ${daysLeft} 天`, cls: 'border-emerald-200 bg-emerald-50 text-emerald-700' };
+  }
+  const outcome = entry.https_supported ?? '';
+  if (outcome === 'yes') return { label: '支持 HTTPS', cls: 'border-emerald-200 bg-emerald-50 text-emerald-700' };
+  if (outcome === 'no') return { label: '仅 HTTP', cls: 'border-slate-200 bg-slate-50 text-slate-500' };
+  if (outcome === 'unknown') return { label: '未探到', cls: 'border-slate-200 bg-slate-50 text-slate-400' };
+  return { label: '未探测', cls: 'border-slate-200 bg-slate-50 text-slate-400' };
+}
+
 export function normStatus(s?: string | null): MonitorStatus {
   if (s === 'up' || s === 'slow' || s === 'down') return s;
   return 'unknown';
