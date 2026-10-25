@@ -8,6 +8,7 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 
 export interface SelectOption {
   value: string;
@@ -27,6 +28,8 @@ const VIEWPORT_GAP = 8;
 const MAX_MENU_H = 288;
 /** 下拉最大宽度，避免长文本把菜单撑得过宽 */
 const MAX_MENU_W = 360;
+/** 下拉的层级：要盖住形式多样的浮层（模态框 z-50、侧栏用户菜单 z-30），但低于确认弹窗 z-[100] */
+const MENU_Z = 'z-[80]';
 /** 连打字母时，多久之内算一次连续输入（用于首字母跳转） */
 const TYPEAHEAD_MS = 700;
 
@@ -103,6 +106,9 @@ export function Select({
   const [placement, setPlacement] = useState<Placement | null>(null);
   const [active, setActive] = useState(-1);
   const typed = useRef({ text: '', at: 0 });
+  /** 刚在下拉之外收起时置为 true：浏览器会把这次点击转发给触发器（<label> 的原生转发），
+   *  那一次点击只当「收起」，不再重新展开 */
+  const swallowClick = useRef(false);
 
   const selectedIndex = options.findIndex((o) => o.value === value);
   const selected = selectedIndex >= 0 ? options[selectedIndex] : undefined;
@@ -169,6 +175,63 @@ export function Select({
     const el = menuRef.current?.querySelector<HTMLElement>(`[data-idx="${active}"]`);
     el?.scrollIntoView({ block: 'nearest' });
   }, [open, active]);
+
+  // 每一次真实按下都算新一轮交互：先把「吞掉转发点击」的标记清掉，
+  // 免得标记留到下一次点击，出现「第一下没反应」。
+  // 这个监听在挂载时注册，比下面按需注册的收起监听更早，捕获阶段先跑，顺序刚好。
+  useEffect(() => {
+    const reset = () => {
+      swallowClick.current = false;
+    };
+    document.addEventListener('pointerdown', reset, true);
+    return () => document.removeEventListener('pointerdown', reset, true);
+  }, []);
+
+  // 关闭时机：只要 pointerdown 落在下拉与触发器之外就收起——包括触发器所在的 <label>
+  // 空白处（那边浏览器会把点击转发给触发器，见 swallowClick）。
+  // 不用整屏遮罩：点到哪就照常作用到哪（例如直接点「取消」按钮，一次点击即可既收起又生效）。
+  useEffect(() => {
+    if (!open) return;
+    /** 落在下拉与触发器之外 */
+    const isOutside = (target: EventTarget | null) => {
+      if (!(target instanceof Node)) return false;
+      if (menuRef.current?.contains(target)) return false;
+      const trigger = triggerRef.current;
+      return !trigger?.contains(target);
+    };
+    // 收起的同时记一笔：紧接着那一次「转发到触发器」的点击要忽略，否则下拉会当场又弹开，
+    // 看起来就是怎么点都关不掉。
+    const outside = () => {
+      swallowClick.current = true;
+      close();
+    };
+    const onPointerDown = (e: Event) => {
+      if (isOutside(e.target)) outside();
+    };
+    // 键盘激活（Enter / 空格）其它控件时不会有 pointerdown，用 click 兜底
+    const onClick = (e: Event) => {
+      if (isOutside(e.target)) outside();
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('click', onClick, true);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('click', onClick, true);
+    };
+  }, [close, open]);
+
+  // 任意位置按 Esc 都能收起，不必先把焦点放回触发器
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      close();
+      triggerRef.current?.focus();
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
+  }, [close, open]);
 
   // 固定定位的下拉会随页面滚动与触发器脱节：跟随重算位置，触发器滚出视口则收起
   useEffect(() => {
@@ -267,7 +330,16 @@ export function Select({
         aria-expanded={open}
         aria-label={ariaLabel}
         aria-activedescendant={open && active >= 0 ? `${listId}-${active}` : undefined}
-        onClick={() => (open ? close() : openMenu())}
+        onClick={() => {
+          // 由 <label> 转发来的点击（在字段标题/提示处按下）只当收起，不再重新展开，
+          // 否则就是「怎么点都关不掉」
+          if (swallowClick.current) {
+            swallowClick.current = false;
+            return;
+          }
+          if (open) close();
+          else openMenu();
+        }}
         onKeyDown={onKeyDown}
         className={`${triggerCls} flex w-full items-center justify-between bg-white text-left outline-none transition disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 ${
           open
@@ -281,16 +353,17 @@ export function Select({
         <Chevron open={open} />
       </button>
 
-      {open && placement && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={close} />
+      {open &&
+        placement &&
+        createPortal(
+          // 挂到 body 上渲染：既不嵌在 <label> / 模态框内部，也不会被祖先的 overflow / transform 影响定位
           <div
             ref={menuRef}
             role="listbox"
             aria-label={ariaLabel}
             id={listId}
             style={style}
-            className="fixed z-20 overflow-y-auto overscroll-contain rounded-xl border border-slate-200 bg-white py-1 shadow-lg"
+            className={`${MENU_Z} fixed overflow-y-auto overscroll-contain rounded-xl border border-slate-200 bg-white py-1 shadow-lg`}
           >
             {options.length === 0 && (
               <p className="px-3 py-2 text-sm text-slate-400">暂无可选项</p>
@@ -337,9 +410,9 @@ export function Select({
                 </button>
               );
             })}
-          </div>
-        </>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
