@@ -3,6 +3,7 @@ import { api } from '../api';
 import { useConfirm } from '../components/ConfirmDialog';
 import { ROLE_LABELS, useAuth, type UserRole } from '../auth';
 import { Card, ErrorBanner, PageHeader, Spinner } from '../components/ui';
+import { Select } from '../components/Select';
 import type { AuditLogItem, AuditLogPayload, SessionItem, UserItem } from '../types';
 import { errMsg, fmtDateTime, fmtRelative, isTruthy } from '../utils';
 
@@ -1124,18 +1125,17 @@ export default function Users() {
             <h3 className="text-sm font-semibold text-slate-900">审计日志</h3>
             <span className="text-xs text-slate-400">共 {auditTotal} 条</span>
             <div className="ml-auto flex flex-wrap items-center gap-2">
-              <select
-                className={`${inputCls} !w-44 !py-1.5`}
+              <Select
+                size="sm"
+                className="!w-44"
                 value={auditAction}
-                onChange={(e) => setAuditAction(e.target.value)}
-              >
-                <option value="">全部动作</option>
-                {Object.entries(auditActions).map(([key, label]) => (
-                  <option key={key} value={key}>
-                    {label}
-                  </option>
-                ))}
-              </select>
+                onChange={setAuditAction}
+                ariaLabel="按动作筛选审计日志"
+                options={[
+                  { value: '', label: '全部动作', divider: true },
+                  ...Object.entries(auditActions).map(([key, label]) => ({ value: key, label })),
+                ]}
+              />
               <input
                 className={`${inputCls} w-56 !py-1.5`}
                 placeholder="搜索操作人 / 对象 / 详情…"

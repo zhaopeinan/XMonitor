@@ -4,6 +4,7 @@ import { api } from '../api';
 import { useConfirm } from '../components/ConfirmDialog';
 import { useAuth } from '../auth';
 import { Card, ErrorBanner, PageHeader, Spinner } from '../components/ui';
+import { Select } from '../components/Select';
 import type { LedgerEntry, SystemInfo } from '../types';
 import { errMsg, isTruthy } from '../utils';
 
@@ -687,18 +688,15 @@ export default function Ledger() {
           </Field>
 
           <Field label="关联监控系统" hint="可选；关联后可直接跳到该系统的监控详情">
-            <select
-              className={inputCls}
+            <Select
               value={form.system_id}
-              onChange={(e) => setForm((f) => ({ ...f, system_id: e.target.value }))}
-            >
-              <option value="">不关联</option>
-              {systems.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setForm((f) => ({ ...f, system_id: v }))}
+              ariaLabel="关联监控系统"
+              options={[
+                { value: '', label: '不关联', divider: true },
+                ...systems.map((s) => ({ value: String(s.id), label: s.name })),
+              ]}
+            />
           </Field>
 
           <Field label="备注">

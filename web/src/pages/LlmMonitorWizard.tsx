@@ -5,6 +5,7 @@ import { api } from '../api';
 import type { LlmChannel } from '../types';
 import { errMsg } from '../utils';
 import { Card, ErrorBanner, PageHeader, Spinner } from '../components/ui';
+import { Select } from '../components/Select';
 
 const inputCls =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 placeholder-slate-400 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200';
@@ -213,21 +214,21 @@ export default function LlmMonitorWizard() {
           {mode === 'existing' ? (
             <div className="mb-4">
               <label className="mb-1.5 block text-sm font-medium text-slate-700">已有监控渠道</label>
-              <select
-                className={inputCls}
-                value={existingId}
-                onChange={(e) => {
-                  setExistingId(e.target.value ? Number(e.target.value) : '');
+              <Select
+                value={existingId === '' ? '' : String(existingId)}
+                onChange={(v) => {
+                  setExistingId(v ? Number(v) : '');
                   setUpstream([]);
                   setSelected(new Set());
                 }}
-              >
-                {monitorChannels.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} · {c.base_url}（{c.models.length} 模型）
-                  </option>
-                ))}
-              </select>
+                placeholder="请选择渠道"
+                ariaLabel="已有监控渠道"
+                options={monitorChannels.map((c) => ({
+                  value: String(c.id),
+                  label: c.name,
+                  note: `${c.base_url}（${c.models.length} 模型）`,
+                }))}
+              />
             </div>
           ) : (
             <div className="mb-4">
@@ -289,16 +290,17 @@ export default function LlmMonitorWizard() {
           <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-600">探测模式（应用于所选模型）</label>
-              <select
-                className={inputCls}
+              <Select
                 value={probeMode}
-                onChange={(e) => setProbeMode(e.target.value as typeof probeMode)}
-              >
-                <option value="stream">流式短补全（TTFT/TPS，推荐）</option>
-                <option value="ping">短对话 ping</option>
-                <option value="models">仅网关 /models</option>
-                <option value="chat">完整短对话</option>
-              </select>
+                onChange={(v) => setProbeMode(v as typeof probeMode)}
+                ariaLabel="探测模式"
+                options={[
+                  { value: 'stream', label: '流式短补全（TTFT/TPS，推荐）' },
+                  { value: 'ping', label: '短对话 ping' },
+                  { value: 'models', label: '仅网关 /models' },
+                  { value: 'chat', label: '完整短对话' },
+                ]}
+              />
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-600">巡检间隔（秒）</label>

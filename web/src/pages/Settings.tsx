@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import LlmProfilesSection from '../components/LlmProfilesSection';
+import { Select } from '../components/Select';
 import { StatusDot } from '../components/StatusDot';
 import { Card, ErrorBanner, PageHeader, Skeleton, Spinner, Toggle } from '../components/ui';
 import type { SettingsMap, SsoTestResult, TestResult } from '../types';
@@ -88,10 +89,15 @@ export default function Settings() {
 
   const set =
     (key: keyof SettingsMap) =>
-    (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-      setForm((prev) => (prev ? { ...prev, [key]: e.target.value } : prev));
-      setSaved(false);
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setField(key, e.target.value);
     };
+
+  /** 非输入框控件（下拉等）直接给值，同样要清掉「已保存」提示 */
+  const setField = (key: keyof SettingsMap, value: string) => {
+    setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
+    setSaved(false);
+  };
 
   const save = async () => {
     if (!form) return;
@@ -295,11 +301,16 @@ export default function Settings() {
                 <input className={inputCls} value={form.webhook_url} onChange={set('webhook_url')} />
               </Field>
               <Field label="Webhook 模板">
-                <select className={inputCls} value={form.webhook_template} onChange={set('webhook_template')}>
-                  <option value="generic">通用 JSON</option>
-                  <option value="dingtalk">钉钉</option>
-                  <option value="wecom">企业微信</option>
-                </select>
+                <Select
+                  value={form.webhook_template}
+                  onChange={(v) => setField('webhook_template', v)}
+                  ariaLabel="Webhook 模板"
+                  options={[
+                    { value: 'generic', label: '通用 JSON' },
+                    { value: 'dingtalk', label: '钉钉' },
+                    { value: 'wecom', label: '企业微信' },
+                  ]}
+                />
               </Field>
             </div>
           </Card>
