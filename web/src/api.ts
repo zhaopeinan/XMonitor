@@ -6,6 +6,7 @@ import type {
   AnalysisResult,
   CheckRecord,
   DashboardData,
+  DomainResolveResult,
   LedgerEntry,
   LedgerEntryInput,
   LlmChannel,
@@ -138,6 +139,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
   deleteLedgerEntry: (id: number) => request<unknown>(`/api/ledger/${id}`, { method: 'DELETE' }),
+  resolveLedgerDomain: (domain: string) =>
+    post<DomainResolveResult>('/api/ledger/resolve-domain', { domain }),
 
   getSettings: () => request<SettingsMap>('/api/settings'),
   putSettings: (settings: SettingsMap) =>

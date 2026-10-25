@@ -71,6 +71,14 @@ export interface LedgerEntryInput {
   system_id?: number | null;
 }
 
+/** 服务端按域名查 DNS 的结果，用于台账表单里的「解析 IP」 */
+export interface DomainResolveResult {
+  host: string;
+  domain: string;
+  addresses: { address: string; family: number }[];
+  elapsed_ms: number;
+}
+
 export interface SystemSummary extends SystemInfo {
   overall_status: MonitorStatus | string | null;
   reverse_count?: number;

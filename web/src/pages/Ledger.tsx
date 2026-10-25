@@ -179,6 +179,10 @@ export default function Ledger() {
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [pendingIds, setPendingIds] = useState<Set<number>>(new Set());
+  // 「按域名解析 IP」：按钮 loading、成功提示、失败提示
+  const [resolving, setResolving] = useState(false);
+  const [resolveNotice, setResolveNotice] = useState<string | null>(null);
+  const [resolveError, setResolveError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -248,6 +252,8 @@ export default function Ledger() {
     setEditing(null);
     setForm(EMPTY_FORM);
     setFormError(null);
+    setResolveNotice(null);
+    setResolveError(null);
     setFormOpen(true);
   };
 
@@ -255,10 +261,41 @@ export default function Ledger() {
     setEditing(entry);
     setForm(formFromEntry(entry));
     setFormError(null);
+    setResolveNotice(null);
+    setResolveError(null);
     setFormOpen(true);
   };
 
   const domainMissing = form.domain_applied && !form.domain.trim();
+
+  /** 调服务端按域名查 DNS，把解析到的 IP 填进 IP 字段 */
+  const doResolve = async () => {
+    const domain = form.domain.trim();
+    if (!domain) {
+      setResolveError('请先填写域名再解析');
+      return;
+    }
+    if (resolving) return;
+    setResolving(true);
+    setResolveError(null);
+    setResolveNotice(null);
+    try {
+      const r = await api.resolveLedgerDomain(domain);
+      const first = r.addresses[0];
+      if (!first) {
+        setResolveError('DNS 没有返回地址记录');
+        return;
+      }
+      setForm((f) => ({ ...f, ip: first.address }));
+      const rest = r.addresses.slice(1).filter((a) => a.address !== first.address);
+      const more = rest.length > 0 ? `；另有 ${rest.map((a) => a.address).join('、')}，需要时手动补进 IP` : '';
+      setResolveNotice(`解析成功（${r.elapsed_ms}ms）：已填入 ${first.address}${more}`);
+    } catch (e) {
+      setResolveError(errMsg(e));
+    } finally {
+      setResolving(false);
+    }
+  };
 
   const submit = async () => {
     if (saving) return;
@@ -628,6 +665,25 @@ export default function Ledger() {
               onChange={(e) => setForm((f) => ({ ...f, ip: e.target.value }))}
               placeholder="10.0.0.11"
             />
+            {/* 已申请域名时可让服务器按 DNS 解析，把 IP 自动填进来 */}
+            {form.domain_applied && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void doResolve()}
+                  disabled={resolving || !form.domain.trim()}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {resolving && <Spinner className="h-3.5 w-3.5" />}
+                  按域名解析 IP
+                </button>
+                {resolveNotice ? (
+                  <span className="text-xs text-emerald-600">{resolveNotice}</span>
+                ) : (
+                  resolveError && <span className="text-xs text-rose-600">{resolveError}</span>
+                )}
+              </div>
+            )}
           </Field>
 
           <div className="mb-4 flex flex-wrap gap-8">
@@ -648,7 +704,11 @@ export default function Ledger() {
               <span className="text-sm font-medium text-slate-700">是否申请域名</span>
               <YesNo
                 value={form.domain_applied}
-                onChange={(next) => setForm((f) => ({ ...f, domain_applied: next }))}
+                onChange={(next) => {
+                  setResolveNotice(null);
+                  setResolveError(null);
+                  setForm((f) => ({ ...f, domain_applied: next }));
+                }}
                 yesLabel="是"
                 noLabel="否"
               />
@@ -658,7 +718,7 @@ export default function Ledger() {
               required={form.domain_applied}
               hint={
                 form.domain_applied
-                  ? '只填主机名，可带端口，例如 oa.example.com'
+                  ? '只填主机名，可带端口，例如 oa.example.com；填好后可到下方 IP 处「按域名解析 IP」自动填入'
                   : '已选择「否」，不需要填写域名；保存时会清空该条目的域名'
               }
               error={form.domain_applied && form.domain === '' ? '选择「是」后必须填写域名' : undefined}
@@ -671,6 +731,8 @@ export default function Ledger() {
                 disabled={!form.domain_applied}
                 onChange={(e) => {
                   setFormError(null);
+                  setResolveNotice(null);
+                  setResolveError(null);
                   setForm((f) => ({ ...f, domain: e.target.value }));
                 }}
                 placeholder={form.domain_applied ? 'oa.example.com' : '未申请域名，无需填写'}

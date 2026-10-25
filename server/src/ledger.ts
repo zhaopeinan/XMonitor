@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { lookup } from 'node:dns';
 import { isIP } from 'node:net';
 import { db } from './db';
 import { requirePermission } from './users';
@@ -245,4 +246,79 @@ ledgerRouter.delete('/ledger/:id', requirePermission('ledger.manage'), (req, res
   const info = db.prepare('DELETE FROM system_ledgers WHERE id = ?').run(Number(req.params.id));
   if (info.changes === 0) return res.status(404).json({ error: '台账条目不存在' });
   res.json({ ok: true });
+});
+
+// ---- 域名解析（台账表单里的「解析 IP」） ----
+
+const DNS_TIMEOUT_MS = 5000;
+
+interface ResolvedAddress {
+  address: string;
+  family: number;
+}
+
+/** 从归一化后的域名里取出可解析的主机名：去掉端口与通配符前缀 */
+function hostFromDomain(domain: string): { host: string; wildcard: boolean } {
+  const colon = domain.lastIndexOf(':');
+  const raw = (colon === -1 ? domain : domain.slice(0, colon)).replace(/\.$/, '');
+  const wildcard = raw.startsWith('*.');
+  return { host: wildcard ? raw.slice(2) : raw, wildcard };
+}
+
+/**
+ * 用系统解析器（getaddrinfo，和 ping / curl 的第一步相同）查询域名：
+ * 先读 /etc/hosts，再问 /etc/resolv.conf 里的 DNS，所以内网域名也能解析。
+ */
+function lookupHost(host: string): Promise<ResolvedAddress[]> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(Object.assign(new Error('解析超时'), { code: 'ETIMEOUT' })),
+      DNS_TIMEOUT_MS,
+    );
+    lookup(host, { all: true }, (err, addresses) => {
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(addresses.map((a) => ({ address: a.address, family: a.family })));
+    });
+  });
+}
+
+function dnsErrorText(code: string | undefined, host: string): string {
+  switch (code) {
+    case 'ENOTFOUND':
+    case 'EAI_NODATA':
+      return `DNS 查不到 ${host} 的记录：域名可能拼错了，或服务器当前网络解析不了它`;
+    case 'EAI_AGAIN':
+      return `DNS 服务器暂时无响应，请稍后重试（${host}）`;
+    case 'EAI_FAIL':
+      return `DNS 服务器返回无效响应（${host}），请检查服务器上的 DNS 配置`;
+    case 'ETIMEOUT':
+      return `解析 ${host} 超时（${DNS_TIMEOUT_MS / 1000} 秒），请检查服务器 DNS 是否可达`;
+    default:
+      return `解析 ${host} 失败${code ? `（${code}）` : ''}`;
+  }
+}
+
+/** 按域名查 DNS 记录并返回解析到的 IP，供台账表单自动填写 */
+ledgerRouter.post('/ledger/resolve-domain', requirePermission('ledger.manage'), async (req, res) => {
+  const domainResult = normalizeDomain((req.body ?? {}).domain);
+  if (!domainResult.ok) return res.status(400).json({ error: domainResult.error });
+  if (!domainResult.value) return res.status(400).json({ error: '请先填写域名' });
+
+  const { host, wildcard } = hostFromDomain(domainResult.value);
+  if (wildcard) return res.status(400).json({ error: '通配符域名（*. 开头）不能直接解析，请填写具体主机名' });
+
+  const started = Date.now();
+  try {
+    const addresses = await lookupHost(host);
+    if (addresses.length === 0) {
+      return res.status(404).json({ error: `DNS 没有返回 ${host} 的地址记录` });
+    }
+    // IPv4 排前面，抄进 IP 字段更顺手
+    addresses.sort((a, b) => a.family - b.family);
+    res.json({ host, domain: domainResult.value, addresses, elapsed_ms: Date.now() - started });
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    res.status(code === 'ETIMEOUT' ? 504 : 400).json({ error: dnsErrorText(code, host) });
+  }
 });
