@@ -1041,7 +1041,10 @@ export default function Users() {
                       <th className="px-3 py-3 font-medium">登录时间</th>
                       <th className="px-3 py-3 font-medium">最近活跃</th>
                       <th className="px-3 py-3 font-medium">到期时间</th>
-                      <th className="w-44 px-5 py-3 text-right font-medium">操作</th>
+                      {/* 操作列常驻表格右侧：数据列横向滚动时按钮始终可见 */}
+                      <th className="sticky right-0 z-20 w-44 border-l border-slate-100 bg-slate-50 px-5 py-3 text-right font-medium shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.18)]">
+                        操作
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1050,7 +1053,7 @@ export default function Users() {
                       const count = sessionCountByUser.get(s.user_id) ?? 1;
                       const sessionLocked = adminLocked(s.role);
                       return (
-                        <tr key={s.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
+                        <tr key={s.id} className="group border-b border-slate-50 last:border-0 hover:bg-slate-50">
                           <td className="whitespace-nowrap px-5 py-3.5">
                             <div className="flex items-center gap-2">
                               <span className="font-medium text-slate-900">{s.username}</span>
@@ -1078,7 +1081,7 @@ export default function Users() {
                             {s.last_seen_at ? fmtRelative(s.last_seen_at) : '—'}
                           </td>
                           <td className="whitespace-nowrap px-3 py-3.5 text-xs text-slate-500">{fmtDateTime(s.expires_at)}</td>
-                          <td className="whitespace-nowrap px-5 py-3.5 text-right">
+                          <td className="sticky right-0 z-10 whitespace-nowrap border-l border-slate-100 bg-white px-5 py-3.5 text-right shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.18)] group-hover:bg-slate-50">
                             <div className="inline-flex items-center gap-2">
                               {!s.current && (
                                 <button

@@ -453,14 +453,19 @@ export default function Ledger() {
                   <th className="px-3 py-3 font-medium">物理机位置</th>
                   <th className="px-3 py-3 font-medium">关联监控</th>
                   <th className="px-3 py-3 font-medium">备注</th>
-                  {canWrite && <th className="w-28 px-3 py-3 text-right font-medium">操作</th>}
+                  {canWrite && (
+                    /* 操作列常驻表格右侧：数据列横向滚动时按钮始终可见 */
+                    <th className="sticky right-0 z-20 w-32 border-l border-slate-100 bg-slate-50 px-5 py-3 text-right font-medium shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.18)]">
+                      操作
+                    </th>
+                  )}
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((e) => {
                   const busy = pendingIds.has(e.id);
                   return (
-                    <tr key={e.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
+                    <tr key={e.id} className="group border-b border-slate-50 last:border-0 hover:bg-slate-50">
                       <td className="whitespace-nowrap px-5 py-3.5">
                         <span className="font-medium text-slate-900">{e.name}</span>
                       </td>
@@ -519,7 +524,7 @@ export default function Ledger() {
                         )}
                       </td>
                       {canWrite && (
-                        <td className="whitespace-nowrap px-3 py-3.5 text-right">
+                        <td className="sticky right-0 z-10 whitespace-nowrap border-l border-slate-100 bg-white px-5 py-3.5 text-right shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.18)] group-hover:bg-slate-50">
                           <div className="flex items-center justify-end gap-1">
                             <button
                               type="button"
