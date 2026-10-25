@@ -21,12 +21,14 @@ export interface SystemLedgerRow {
   name: string;
   ops_unit: string;
   ip: string;
-  /** 操作系统：人工登记或操作系统探测写入的结论，例如 Linux（Ubuntu） */
-  os: string;
-  /** 探测依据原文（含探测目标与时间），只由探测写入 */
-  os_evidence: string;
-  /** 最近一次探测时间，人工登记的操作系统该字段为空 */
-  os_checked_at: number | null;
+  /** HTTPS 探测结论：''=未探测，yes=支持、no=不支持、unknown=探测不到 */
+  https_supported: string;
+  /** 证书过期时间（毫秒时间戳），只在探测到证书时有值 */
+  cert_expires_at: number | null;
+  /** HTTPS 探测依据原文（含探测目标与时间），只由探测写入 */
+  cert_evidence: string;
+  /** 最近一次 HTTPS 探测时间（毫秒时间戳） */
+  https_checked_at: number | null;
   external_access: number;
   domain_applied: number;
   domain: string;

@@ -218,14 +218,29 @@ for (const sql of [
   'ALTER TABLE sessions ADD COLUMN last_seen_at INTEGER',
   // 台账运维单位（老库补齐）
   "ALTER TABLE system_ledgers ADD COLUMN ops_unit TEXT NOT NULL DEFAULT ''",
-  // 台账操作系统：os 是探测/登记结论，os_evidence 是探测依据原文，os_checked_at 是探测时间
-  "ALTER TABLE system_ledgers ADD COLUMN os TEXT NOT NULL DEFAULT ''",
-  "ALTER TABLE system_ledgers ADD COLUMN os_evidence TEXT NOT NULL DEFAULT ''",
-  'ALTER TABLE system_ledgers ADD COLUMN os_checked_at INTEGER',
+  // 台账 HTTPS / 证书探测：supported 是结论（yes / no / unknown），cert_expires_at 是证书过期时间，
+  // cert_evidence 是探测依据原文，https_checked_at 是最近一次探测时间
+  "ALTER TABLE system_ledgers ADD COLUMN https_supported TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE system_ledgers ADD COLUMN cert_expires_at INTEGER',
+  "ALTER TABLE system_ledgers ADD COLUMN cert_evidence TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE system_ledgers ADD COLUMN https_checked_at INTEGER',
 ]) {
   try {
     db.exec(sql);
   } catch {
     // duplicate column
+  }
+}
+
+// 操作系统探测功能已下线：老库里把遗留的三列删掉（新库本来就没有，删不到会报错，忽略即可）
+for (const sql of [
+  'ALTER TABLE system_ledgers DROP COLUMN os',
+  'ALTER TABLE system_ledgers DROP COLUMN os_evidence',
+  'ALTER TABLE system_ledgers DROP COLUMN os_checked_at',
+]) {
+  try {
+    db.exec(sql);
+  } catch {
+    // 列不存在，跳过
   }
 }
