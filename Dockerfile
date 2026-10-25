@@ -14,7 +14,17 @@ RUN npm run build -w web
 
 # ---- runtime（内置 Chromium，提供 Obscura/CDP）----
 FROM ${NODE_IMAGE}
-RUN apt-get update \
+# apt 源可覆盖：国内网络可用镜像站提速，例如
+#   docker build --build-arg APT_MIRROR=mirrors.tuna.tsinghua.edu.cn ...
+ARG APT_MIRROR=deb.debian.org
+RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
+      for f in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+        if [ -f "$f" ]; then \
+          sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" "$f"; \
+        fi; \
+      done; \
+    fi \
+  && apt-get update \
   && apt-get install -y --no-install-recommends \
     python3 make g++ \
     chromium \
