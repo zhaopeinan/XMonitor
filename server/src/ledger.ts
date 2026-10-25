@@ -396,8 +396,10 @@ async function scanEntry(row: SystemLedgerRow): Promise<ScanResultItem> {
     // IPv4 排前面，取第一个作为待写入的 IP
     addresses.sort((a, b) => a.family - b.family);
     const resolvedIp = addresses[0].address;
-    const currentIp = row.ip.trim();
-    const status: ScanStatus = !currentIp ? 'fill' : currentIp === resolvedIp ? 'same' : 'change';
+    // 台账的 IP 字段可以存多个（逗号/空格分隔）：解析结果已经在里面就不算变化，
+    // 只有解析到新地址时才提示覆盖，避免把多 IP 记成「不同」又冲掉其余地址
+    const currentIps = row.ip.split(/[\s,，;；、]+/).filter(Boolean);
+    const status: ScanStatus = currentIps.length === 0 ? 'fill' : currentIps.includes(resolvedIp) ? 'same' : 'change';
     return { ...base, host, addresses, resolved_ip: resolvedIp, status, elapsed_ms: elapsed };
   } catch (e) {
     return {
