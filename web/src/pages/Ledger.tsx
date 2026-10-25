@@ -6,10 +6,14 @@ import { useAuth } from '../auth';
 import { Card, ErrorBanner, PageHeader, Spinner } from '../components/ui';
 import { Select } from '../components/Select';
 import type { LedgerEntry, LedgerScanItem, LedgerScanResult, SystemInfo } from '../types';
-import { errMsg, isTruthy } from '../utils';
+import { errMsg, isInternalAddress, isTruthy } from '../utils';
 
 const inputCls =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 placeholder-slate-400 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200';
+
+/** 扫描结果弹窗里的快捷勾选按钮样式 */
+const chipBtnCls =
+  'rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40';
 
 type ExternalFilter = 'all' | 'yes' | 'no';
 type DomainFilter = 'all' | 'yes' | 'no';
@@ -360,6 +364,16 @@ export default function Ledger() {
     (it) => it.status === 'change' && scanChecked.has(it.id),
   ).length;
 
+  /** 扫描结果里可一键纳入的条目：IP 为空的 / 与已有 IP 不同的 */
+  const scanFillIds = useMemo(
+    () => (scanResult?.results ?? []).filter((it) => it.status === 'fill' && it.resolved_ip).map((it) => it.id),
+    [scanResult],
+  );
+  const scanChangeIds = useMemo(
+    () => (scanResult?.results ?? []).filter((it) => it.status === 'change' && it.resolved_ip).map((it) => it.id),
+    [scanResult],
+  );
+
   /** 一键 IP 扫描：先按域名批量查 DNS（只读），结果给用户在弹窗里复核后才写回 */
   const runScan = async () => {
     if (scanning || selected.size === 0) return;
@@ -395,8 +409,8 @@ export default function Ledger() {
       setSelected(new Set());
       setNotice(
         `已按扫描结果写入 ${r.updated} 条台账的 IP${
-          r.missing.length > 0 ? `；${r.missing.length} 条已不存在，未写入` : ''
-        }`,
+          r.overwritten > 0 ? `，其中 ${r.overwritten} 条旧 IP 已记入备注` : ''
+        }${r.missing.length > 0 ? `；${r.missing.length} 条已不存在，未写入` : ''}`,
       );
       await load();
     } catch (e) {
@@ -1044,7 +1058,9 @@ export default function Ledger() {
             <>
               <span className="mr-auto text-xs text-slate-500">
                 {scanChecked.size > 0
-                  ? `将写入 ${scanChecked.size} 条${overwriteCount > 0 ? `（其中覆盖已有 IP ${overwriteCount} 条）` : ''}`
+                  ? `将写入 ${scanChecked.size} 条${
+                      overwriteCount > 0 ? `（其中覆盖已有 IP ${overwriteCount} 条，旧值会记入备注）` : ''
+                    }`
                   : '勾选要写入的条目'}
               </span>
               <button
@@ -1073,10 +1089,35 @@ export default function Ledger() {
             </div>
           )}
 
+          {scanResult.results.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button type="button" className={chipBtnCls} onClick={() => setScanChecked(new Set(scanFillIds))}>
+                只选空值 ({scanFillIds.length})
+              </button>
+              <button
+                type="button"
+                className={chipBtnCls}
+                disabled={scanChangeIds.length === 0}
+                onClick={() => setScanChecked((prev) => new Set([...prev, ...scanChangeIds]))}
+              >
+                加上全部差异项 ({scanChangeIds.length})
+              </button>
+              <button
+                type="button"
+                className={chipBtnCls}
+                disabled={scanChecked.size === 0}
+                onClick={() => setScanChecked(new Set())}
+              >
+                全不选
+              </button>
+              <span className="ml-auto text-xs text-slate-400">已勾选 {scanChecked.size} 条</span>
+            </div>
+          )}
+
           {scanResult.summary.change > 0 && (
             <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs leading-relaxed text-amber-700">
               有 {scanResult.summary.change} 条记录的已有 IP 与解析结果不同（常见于台账登记内网地址、DNS 返回公网地址），
-              这些条目默认不勾选；确认要改的再手动勾上，避免一键冲掉人工维护的地址。
+              默认不勾选；确认要改的可以逐条勾，或点上方「加上全部差异项」一键纳入。写入时旧 IP 会自动记入备注留痕。
             </div>
           )}
 
@@ -1132,6 +1173,16 @@ export default function Ledger() {
                         >
                           {it.resolved_ip ?? '—'}
                         </span>
+                        {it.status === 'change' &&
+                          isInternalAddress(it.current_ip) &&
+                          !isInternalAddress(it.resolved_ip) && (
+                            <span
+                              className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700"
+                              title="台账登记的是内网地址，DNS 返回的是公网地址；写入后旧 IP 会记入备注"
+                            >
+                              内网 → 公网
+                            </span>
+                          )}
                         {it.elapsed_ms > 0 && <span className="text-slate-400">{it.elapsed_ms}ms</span>}
                       </div>
                       {it.addresses.length > 1 && (

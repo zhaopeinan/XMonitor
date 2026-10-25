@@ -101,6 +101,13 @@ export interface LedgerScanResult {
   summary: { total: number; fill: number; change: number; same: number; skipped: number; failed: number };
 }
 
+/** 「写入台账」的结果：overwritten 为覆盖掉旧 IP 的条数，旧值已记入备注 */
+export interface LedgerApplyResult {
+  updated: number;
+  missing: number[];
+  overwritten: number;
+}
+
 export interface SystemSummary extends SystemInfo {
   overall_status: MonitorStatus | string | null;
   reverse_count?: number;

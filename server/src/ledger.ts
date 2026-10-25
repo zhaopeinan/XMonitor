@@ -464,7 +464,19 @@ ledgerRouter.post('/ledger/scan-ips', requirePermission('ledger.manage'), async 
   res.json({ results, summary });
 });
 
-/** 把扫描结果里用户勾选过的 IP 写回台账 */
+/**
+ * 覆盖旧 IP 时把原值记进备注留痕，避免扫描结果冲掉人工登记的地址后无从追溯。
+ * 备注是自由文本，超过 2000 字时丢弃最早的内容，保留最近的记录。
+ */
+function appendOverwriteTrace(remark: string, oldIp: string, at: number): string {
+  const d = new Date(at);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const trace = `[原 IP ${oldIp} / ${day} 扫描覆盖]`;
+  return (remark ? `${remark}\n${trace}` : trace).slice(-2000);
+}
+
+/** 把扫描结果里用户勾选过的 IP 写回台账；覆盖已有 IP 时把旧值记入备注留痕 */
 ledgerRouter.post('/ledger/scan-ips/apply', requirePermission('ledger.manage'), (req, res) => {
   const raw = (req.body ?? {}) as { updates?: unknown };
   if (!Array.isArray(raw.updates) || raw.updates.length === 0) {
@@ -486,17 +498,27 @@ ledgerRouter.post('/ledger/scan-ips/apply', requirePermission('ledger.manage'), 
   }
 
   const now = Date.now();
-  const statement = db.prepare('UPDATE system_ledgers SET ip = ?, updated_at = ? WHERE id = ?');
+  const selectStatement = db.prepare('SELECT ip, remark FROM system_ledgers WHERE id = ?');
+  const updateStatement = db.prepare('UPDATE system_ledgers SET ip = ?, remark = ?, updated_at = ? WHERE id = ?');
   let updated = 0;
+  let overwritten = 0;
   const missing: number[] = [];
   const applyAll = db.transaction((rows: { id: number; ip: string }[]) => {
     for (const row of rows) {
-      const info = statement.run(row.ip, now, row.id);
-      if (info.changes > 0) updated += 1;
-      else missing.push(row.id);
+      const current = selectStatement.get(row.id) as { ip: string; remark: string } | undefined;
+      if (!current) {
+        missing.push(row.id);
+        continue;
+      }
+      // 旧 IP 非空且与新值不同才算覆盖：把旧值追加进备注后再写入
+      const overwrite = current.ip !== '' && current.ip !== row.ip;
+      const remark = overwrite ? appendOverwriteTrace(current.remark ?? '', current.ip, now) : current.remark ?? '';
+      updateStatement.run(row.ip, remark, now, row.id);
+      updated += 1;
+      if (overwrite) overwritten += 1;
     }
   });
   applyAll(updates);
 
-  res.json({ updated, missing });
+  res.json({ updated, missing, overwritten });
 });

@@ -9,6 +9,29 @@ export function isTruthy(v: unknown): boolean {
   return v === true || v === 'true' || v === '1' || v === 1;
 }
 
+/**
+ * 判断地址是否属于内网/保留段：IPv4 覆盖 10/8、172.16/12、192.168/16、169.254/16、100.64/10、127/8，
+ * IPv6 覆盖 ::1、fe80::/10、fc00::/7。用于台账扫描结果里提示「内网 → 公网」这类差异。
+ */
+export function isInternalAddress(ip?: string | null): boolean {
+  if (!ip) return false;
+  const lower = ip.trim().toLowerCase();
+  if (lower.includes(':')) {
+    if (lower === '::1') return true;
+    if (/^fe[89ab]/.test(lower)) return true;
+    return lower.startsWith('fc') || lower.startsWith('fd');
+  }
+  const parts = lower.split('.').map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b] = parts;
+  if (a === 10 || a === 127) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
 export function normStatus(s?: string | null): MonitorStatus {
   if (s === 'up' || s === 'slow' || s === 'down') return s;
   return 'unknown';
