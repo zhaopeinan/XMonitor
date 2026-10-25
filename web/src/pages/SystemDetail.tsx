@@ -585,12 +585,6 @@ export default function SystemDetail() {
                     <p className="mt-0.5 break-all font-mono text-sm text-slate-700">{e.ip || '—'}</p>
                   </div>
                   <div>
-                    <p className="text-[11px] text-slate-400">操作系统</p>
-                    <p className="mt-0.5 text-sm text-slate-700" title={e.os_evidence || ''}>
-                      {e.os || '—'}
-                    </p>
-                  </div>
-                  <div>
                     <p className="text-[11px] text-slate-400">外网访问</p>
                     <p className="mt-0.5 text-sm text-slate-700">
                       {isTruthy(e.external_access) ? (

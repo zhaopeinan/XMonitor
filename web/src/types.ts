@@ -47,12 +47,14 @@ export interface LedgerEntry {
   name: string;
   ops_unit: string;
   ip: string;
-  /** 操作系统：人工登记或探测写入的结论，例如 Linux（Ubuntu） */
-  os: string;
-  /** 探测依据原文（含探测目标与时间） */
-  os_evidence: string;
-  /** 最近一次操作系统探测时间 */
-  os_checked_at: number | null;
+  /** HTTPS 探测结论：''=未探测，yes=支持、no=不支持、unknown=探测不到 */
+  https_supported: string;
+  /** 证书过期时间（毫秒时间戳），只在探测到证书时有值 */
+  cert_expires_at: number | null;
+  /** HTTPS 探测依据原文（含探测目标与时间），只由探测写入 */
+  cert_evidence: string;
+  /** 最近一次 HTTPS 探测时间（毫秒时间戳），没探测过时为空 */
+  https_checked_at: number | null;
   external_access: boolean | number;
   domain_applied: boolean | number;
   domain: string;
@@ -69,7 +71,6 @@ export interface LedgerEntryInput {
   name: string;
   ops_unit?: string;
   ip?: string;
-  os?: string;
   external_access?: boolean;
   domain_applied?: boolean;
   domain?: string;
@@ -115,37 +116,73 @@ export interface LedgerApplyResult {
   overwritten: number;
 }
 
-/** 操作系统探测命中的一条证据 */
-export interface LedgerOsEvidence {
-  port: number;
-  source: string;
-  detail: string;
-  family: 'linux' | 'windows' | 'network';
-  version: string | null;
-  strong: boolean;
-  windowsService: boolean;
-  note: string;
+/** HTTPS 探测结论：''=没探测过，yes=支持，no=只提供 HTTP，unknown=连不上或无法判定 */
+export type LedgerHttpsOutcome = '' | 'yes' | 'no' | 'unknown';
+
+/** 证书里的关键信息，全部来自 TLS 握手，不需要登录目标机器 */
+export interface LedgerCertInfo {
+  /** 证书主体（优先 CN），例如 *.example.com */
+  subject: string;
+  /** 颁发者（优先 CN） */
+  issuer: string;
+  validFrom: number | null;
+  validTo: number | null;
+  /** 距离过期还有多少天（负数表示已过期） */
+  daysLeft: number | null;
+  altNames: string[];
+  /** 是否通过系统信任链验证：自签名、过期、名字不匹配都会是 false */
+  authorized: boolean;
+  authError: string | null;
+  /** 握手用的 TLS 版本，例如 TLSv1.3 */
+  protocol: string | null;
+  fingerprint256: string;
+  selfSigned: boolean;
 }
 
-/** 操作系统探测的单条结果 */
-export interface LedgerOsProbeItem {
+/** HTTPS / 证书探测的单条结果 */
+export interface LedgerHttpsProbeItem {
   id: number;
   name: string;
   ip: string;
+  domain: string;
+  /** 实际探测的目标，例如 example.com:443；没有可探测目标时为 null */
   target: string | null;
-  current_os: string;
-  probed_os: string;
-  open_ports: number[];
-  evidence: LedgerOsEvidence[];
+  /** 台账里已有的结论（''=没探测过）与证书过期时间 */
+  current_supported: string;
+  current_expires_at: number | null;
+  /** 本次探测结论 */
+  https: LedgerHttpsOutcome;
+  cert: LedgerCertInfo | null;
+  /** 逐条证据，写回台账时原文存档 */
+  evidence: string[];
   status: LedgerScanStatus;
   message: string | null;
   elapsed_ms: number;
 }
 
-/** 操作系统探测的批量结果 */
-export interface LedgerOsProbeResult {
-  results: LedgerOsProbeItem[];
-  summary: { total: number; fill: number; change: number; same: number; skipped: number; failed: number };
+/** HTTPS / 证书探测的批量结果 */
+export interface LedgerHttpsProbeResult {
+  results: LedgerHttpsProbeItem[];
+  summary: {
+    total: number;
+    /** 支持 / 只提供 HTTP / 探不出来 的条数 */
+    yes: number;
+    no: number;
+    unknown: number;
+    fill: number;
+    change: number;
+    same: number;
+    /** 证书已过期 / 30 天内到期的条数 */
+    expired: number;
+    expiring: number;
+    failed: number;
+  };
+}
+
+/** HTTPS 探测写回结果：这些字段只由探测维护，不会覆盖人工登记的内容，所以没有「覆盖」计数 */
+export interface LedgerHttpsApplyResult {
+  updated: number;
+  missing: number[];
 }
 
 export interface SystemSummary extends SystemInfo {
