@@ -127,6 +127,7 @@ export default function SystemDetail() {
   const { hasPermission } = useAuth();
   const confirm = useConfirm();
   const canManage = hasPermission('systems.manage');
+  const canAnalyze = hasPermission('analyze');
   const isAdmin = canManage; // 详情页写操作统一按 systems.manage
   const navigate = useNavigate();
   const systemId = Number(id);
@@ -518,12 +519,14 @@ export default function SystemDetail() {
                 <Toggle on={isTruthy(system.use_sso)} onChange={() => void toggleSso()} disabled={ssoPending} />
                 SSO
               </label>
-              <button
-                onClick={() => navigate(`/analyze?system=${system.id}`)}
-                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
-              >
-                重新分析
-              </button>
+              {canAnalyze && (
+                <button
+                  onClick={() => navigate(`/analyze?system=${system.id}`)}
+                  className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
+                >
+                  重新分析
+                </button>
+              )}
               <button
                 onClick={openEdit}
                 className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
@@ -883,7 +886,7 @@ export default function SystemDetail() {
         </div>
         {system.monitors.length === 0 ? (
           <div className="px-5 py-10 text-center text-sm text-slate-400">
-            暂无监控项，点击右上角「重新分析」添加
+            {canAnalyze ? '暂无监控项，点击右上角「重新分析」添加' : '暂无监控项，需由具备「智能分析」权限的账号运行分析后添加'}
           </div>
         ) : (
           <ul className="divide-y divide-slate-100">

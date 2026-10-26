@@ -599,7 +599,7 @@ apiRouter.post('/systems/:id/analyze', requirePermission('analyze'), (req, res) 
   res.status(202).json(job);
 });
 
-apiRouter.get('/systems/:id/analysis', (req, res) => {
+apiRouter.get('/systems/:id/analysis', requirePermission('analyze'), (req, res) => {
   const systemId = Number(req.params.id);
   const system = db.prepare('SELECT id FROM systems WHERE id = ?').get(systemId);
   if (!system) return res.status(404).json({ error: '系统不存在' });
@@ -662,7 +662,8 @@ apiRouter.post('/alerts/:id/ack', requirePermission('alerts.ack'), (req, res) =>
 });
 
 // ---- settings ----
-apiRouter.get('/settings', (_req, res) => {
+// 管理入口类权限：未勾选「系统设置」的角色看不到该页面，因此读接口一并拦截
+apiRouter.get('/settings', requirePermission('settings.manage'), (_req, res) => {
   res.json(getMaskedSettings());
 });
 
