@@ -393,6 +393,8 @@ export interface PermissionDef {
   key: string;
   label: string;
   desc: string;
+  /** 未勾选时的表现：readonly=页面仍可查看、只是不能改；hidden=看不到页面与菜单入口 */
+  unchecked: 'readonly' | 'hidden';
 }
 
 /** 数据权限取值：全部数据 / 仅本运维单位 / 仅本人创建 */

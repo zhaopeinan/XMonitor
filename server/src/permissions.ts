@@ -1,14 +1,35 @@
 import { db } from './db';
 import type { UserRole } from './types';
 
-/** 可配置的细粒度权限 */
+/**
+ * 可配置的细粒度权限。
+ * `unchecked` 说明「未勾选时」的表现，避免把勾选框读成「不勾就什么都看不到」：
+ *  - readonly：页面与数据照常可看（能看到多少由数据权限决定），只是不能改动，写接口会返回 403；
+ *  - hidden：连菜单与页面入口都看不到。
+ * 数组顺序即权限矩阵的展示顺序，同组相邻。
+ */
 export const PERMISSION_DEFS = [
-  { key: 'systems.manage', label: '管理系统与监控项', desc: '新增/编辑/删除系统与监控、续期 Token' },
-  { key: 'ledger.manage', label: '管理系统台账', desc: '新增/编辑/删除系统台账条目' },
-  { key: 'analyze', label: '智能分析', desc: '运行页面/接口分析向导' },
-  { key: 'alerts.ack', label: '确认告警', desc: '确认并处理告警' },
-  { key: 'settings.manage', label: '系统设置', desc: 'SSO、Webhook、LLM 档案、Obscura 等' },
-  { key: 'users.manage', label: '用户与角色', desc: '管理账号、修改角色与权限配置' },
+  {
+    key: 'systems.manage',
+    label: '管理系统与监控项',
+    desc: '新增/编辑/删除系统与监控、续期 Token',
+    unchecked: 'readonly',
+  },
+  {
+    key: 'ledger.manage',
+    label: '管理系统台账',
+    desc: '新增/编辑/删除台账条目、按域名解析 IP、批量 IP 与 HTTPS 扫描',
+    unchecked: 'readonly',
+  },
+  { key: 'alerts.ack', label: '确认告警', desc: '确认并处理告警', unchecked: 'readonly' },
+  { key: 'analyze', label: '智能分析', desc: '打开分析向导，运行页面/接口分析', unchecked: 'hidden' },
+  { key: 'settings.manage', label: '系统设置', desc: 'SSO、Webhook、LLM 档案、Obscura 等', unchecked: 'hidden' },
+  {
+    key: 'users.manage',
+    label: '用户与角色',
+    desc: '管理账号、修改角色与权限配置、在线会话与审计日志',
+    unchecked: 'hidden',
+  },
 ] as const;
 
 export type Permission = (typeof PERMISSION_DEFS)[number]['key'];

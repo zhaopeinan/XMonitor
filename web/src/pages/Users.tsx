@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api } from '../api';
 import { useConfirm } from '../components/ConfirmDialog';
 import { ROLE_LABELS, useAuth, type UserRole } from '../auth';
@@ -52,6 +52,15 @@ const DATA_SCOPE_HINTS: Record<string, string> = {
   unit: '按本人运维单位过滤',
   self: '只看本人新建的记录',
 };
+
+/**
+ * 功能权限按「未勾选时的表现」分两组展示。
+ * 勾选框只管「能不能改」，不勾并不等于看不到数据，所以要把只读与隐藏分别写清楚。
+ */
+const PERM_GROUPS: { key: PermissionDef['unchecked']; title: string; note: string }[] = [
+  { key: 'readonly', title: '操作能力', note: '未勾选 = 只读：页面照常可看，只是不能改' },
+  { key: 'hidden', title: '功能入口', note: '未勾选 = 看不到：菜单与页面入口一并隐藏' },
+];
 
 type TabKey = 'accounts' | 'rbac' | 'sessions' | 'audit';
 
@@ -377,6 +386,75 @@ export default function Users() {
 
   /** 当前配置下某个角色的具体权限：功能权限 + 数据权限 */
   const abilitiesOf = (role: UserRole) => describeRole(role, permDefs, rolePerms, dataScopeDefs, roleScopes);
+
+  /** 权限矩阵按「未勾选时的表现」分组；旧服务端没下发该字段时一律按只读处理 */
+  const permGroups = useMemo(
+    () =>
+      PERM_GROUPS.map((g) => ({
+        ...g,
+        defs: permDefs.filter((p) => (p.unchecked === 'hidden') === (g.key === 'hidden')),
+      })).filter((g) => g.defs.length > 0),
+    [permDefs],
+  );
+
+  /** 权限矩阵的一行：能力说明 + 管理员锁定 + 运维员/查看员开关 */
+  const renderPermRow = (p: PermissionDef) => {
+    const opOn = (rolePerms.operator ?? []).includes(p.key);
+    const vwOn = (rolePerms.viewer ?? []).includes(p.key);
+    return (
+      <tr key={p.key} className="border-b border-slate-50 last:border-0">
+        <td className="px-5 py-3.5">
+          <div className="font-medium text-slate-800">{p.label}</div>
+          <div className="mt-0.5 text-xs text-slate-400">{p.desc}</div>
+          <code className="mt-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
+            {p.key}
+          </code>
+        </td>
+        <td className="px-3 py-3.5 text-center">
+          <span
+            className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-indigo-50 text-xs font-semibold text-indigo-600"
+            title="管理员固定拥有"
+          >
+            ✓
+          </span>
+        </td>
+        <td className="px-3 py-3.5 text-center">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={opOn}
+            aria-label={`运维员 · ${p.label}`}
+            onClick={() => togglePerm('operator', p.key)}
+            className={`relative mx-auto h-6 w-11 rounded-full transition-colors ${
+              opOn ? 'bg-emerald-500' : 'bg-slate-200'
+            }`}
+          >
+            <span
+              className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform"
+              style={{ transform: opOn ? 'translateX(20px)' : 'translateX(0)' }}
+            />
+          </button>
+        </td>
+        <td className="px-3 py-3.5 text-center">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={vwOn}
+            aria-label={`查看员 · ${p.label}`}
+            onClick={() => togglePerm('viewer', p.key)}
+            className={`relative mx-auto h-6 w-11 rounded-full transition-colors ${
+              vwOn ? 'bg-emerald-500' : 'bg-slate-200'
+            }`}
+          >
+            <span
+              className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform"
+              style={{ transform: vwOn ? 'translateX(20px)' : 'translateX(0)' }}
+            />
+          </button>
+        </td>
+      </tr>
+    );
+  };
 
   /** 打开/收起账号行的「管理」下拉：先贴在按钮下方，渲染后再按实际高度校正 */
   const toggleMenu = (id: number, el: HTMLButtonElement) => {
@@ -1170,8 +1248,8 @@ export default function Users() {
           <Card className="overflow-hidden">
             <div className="border-b border-slate-100 px-5 py-4">
               <h3 className="text-sm font-semibold text-slate-900">功能权限矩阵</h3>
-              <p className="mt-0.5 text-xs text-slate-400">
-                勾选即为授予。管理员列锁定为全部权限；功能权限与数据权限改动后需点右上角一起保存。
+              <p className="mt-0.5 text-xs leading-relaxed text-slate-400">
+                勾选即为授予「操作能力」；未勾选不等于看不到——能看哪些数据由上方「数据权限」决定。管理员列锁定为全部权限；功能权限与数据权限改动后需点右上角一起保存。
               </p>
             </div>
             {permDefs.length === 0 ? (
@@ -1190,61 +1268,18 @@ export default function Users() {
                     </tr>
                   </thead>
                   <tbody>
-                    {permDefs.map((p) => {
-                      const opOn = (rolePerms.operator ?? []).includes(p.key);
-                      const vwOn = (rolePerms.viewer ?? []).includes(p.key);
-                      return (
-                        <tr key={p.key} className="border-b border-slate-50 last:border-0">
-                          <td className="px-5 py-3.5">
-                            <div className="font-medium text-slate-800">{p.label}</div>
-                            <div className="mt-0.5 text-xs text-slate-400">{p.desc}</div>
-                            <code className="mt-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
-                              {p.key}
-                            </code>
-                          </td>
-                          <td className="px-3 py-3.5 text-center">
-                            <span
-                              className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-indigo-50 text-xs font-semibold text-indigo-600"
-                              title="管理员固定拥有"
-                            >
-                              ✓
-                            </span>
-                          </td>
-                          <td className="px-3 py-3.5 text-center">
-                            <button
-                              type="button"
-                              role="switch"
-                              aria-checked={opOn}
-                              onClick={() => togglePerm('operator', p.key)}
-                              className={`relative mx-auto h-6 w-11 rounded-full transition-colors ${
-                                opOn ? 'bg-emerald-500' : 'bg-slate-200'
-                              }`}
-                            >
-                              <span
-                                className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform"
-                                style={{ transform: opOn ? 'translateX(20px)' : 'translateX(0)' }}
-                              />
-                            </button>
-                          </td>
-                          <td className="px-3 py-3.5 text-center">
-                            <button
-                              type="button"
-                              role="switch"
-                              aria-checked={vwOn}
-                              onClick={() => togglePerm('viewer', p.key)}
-                              className={`relative mx-auto h-6 w-11 rounded-full transition-colors ${
-                                vwOn ? 'bg-emerald-500' : 'bg-slate-200'
-                              }`}
-                            >
-                              <span
-                                className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform"
-                                style={{ transform: vwOn ? 'translateX(20px)' : 'translateX(0)' }}
-                              />
-                            </button>
+                    {permGroups.map((g) => (
+                      <Fragment key={g.key}>
+                        {/* 分组行：把「不勾选会怎样」写在这里，勾选框本身只管能不能改 */}
+                        <tr className="border-y border-slate-100 bg-slate-50/60">
+                          <td colSpan={4} className="px-5 py-2">
+                            <span className="text-xs font-semibold text-slate-700">{g.title}</span>
+                            <span className="ml-2 text-xs text-slate-400">{g.note}</span>
                           </td>
                         </tr>
-                      );
-                    })}
+                        {g.defs.map((p) => renderPermRow(p))}
+                      </Fragment>
+                    ))}
                   </tbody>
                 </table>
               </div>
