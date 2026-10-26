@@ -1,6 +1,8 @@
 import type {
   AlertsResponse,
   AuditLogPayload,
+  DataScopeKey,
+  RolePermissionPayload,
   UserItem,
   SessionItem,
   AnalysisResult,
@@ -269,9 +271,14 @@ export const api = {
     post<unknown>('/api/auth/change-password', { old_password, new_password }),
 
   getUsers: () => request<{ users: UserItem[] }>('/api/users'),
-  createUser: (body: { username: string; password: string; role: string }) =>
+  /** 台账与监控系统里出现过的运维单位，作为账号「所属运维单位」的候选 */
+  getOpsUnits: () => request<{ units: string[] }>('/api/users/ops-units'),
+  createUser: (body: { username: string; password: string; role: string; ops_unit?: string }) =>
     post<{ users: UserItem[] }>('/api/users', body),
-  updateUser: (id: number, patch: { role?: string; password?: string; disabled?: boolean }) =>
+  updateUser: (
+    id: number,
+    patch: { role?: string; password?: string; disabled?: boolean; ops_unit?: string },
+  ) =>
     request<{ users: UserItem[] }>(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteUser: (id: number) => request<{ users: UserItem[] }>(`/api/users/${id}`, { method: 'DELETE' }),
 
@@ -290,16 +297,11 @@ export const api = {
     return request<AuditLogPayload>(`/api/audit-logs${suffix}`);
   },
 
-  getRolePermissions: () =>
-    request<{
-      permissions: { key: string; label: string; desc: string }[];
-      roles: Record<string, string>;
-      role_permissions: Record<string, string[]>;
-    }>('/api/roles/permissions'),
-  updateRolePermissions: (body: { operator?: string[]; viewer?: string[] }) =>
-    request<{
-      permissions: { key: string; label: string; desc: string }[];
-      roles: Record<string, string>;
-      role_permissions: Record<string, string[]>;
-    }>('/api/roles/permissions', { method: 'PUT', body: JSON.stringify(body) }),
+  getRolePermissions: () => request<RolePermissionPayload>('/api/roles/permissions'),
+  updateRolePermissions: (body: {
+    operator?: string[];
+    viewer?: string[];
+    /** 只传要改的角色；与功能权限互不影响 */
+    data_scopes?: Partial<Record<'operator' | 'viewer', DataScopeKey>>;
+  }) => request<RolePermissionPayload>('/api/roles/permissions', { method: 'PUT', body: JSON.stringify(body) }),
 };

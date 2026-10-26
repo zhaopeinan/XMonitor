@@ -383,7 +383,35 @@ export interface UserItem {
   role: 'admin' | 'operator' | 'viewer';
   /** 1=已停用：不可登录，已有会话已失效 */
   disabled: number;
+  /** 所属运维单位：数据权限「仅本运维单位」按它比对台账与监控系统，空串表示未设置 */
+  ops_unit: string;
   created_at: number;
+}
+
+/** 功能权限定义（服务端 PERMISSION_DEFS）：决定角色「能做什么」 */
+export interface PermissionDef {
+  key: string;
+  label: string;
+  desc: string;
+}
+
+/** 数据权限取值：全部数据 / 仅本运维单位 / 仅本人创建 */
+export type DataScopeKey = 'all' | 'unit' | 'self';
+
+/** 数据权限定义（服务端 DATA_SCOPE_DEFS）：决定角色「能看哪些数据」 */
+export interface DataScopeDef {
+  key: DataScopeKey;
+  label: string;
+  desc: string;
+}
+
+/** 角色权限配置：功能权限矩阵 + 数据权限范围 */
+export interface RolePermissionPayload {
+  permissions: PermissionDef[];
+  data_scopes: DataScopeDef[];
+  roles: Record<string, string>;
+  role_permissions: Record<string, string[]>;
+  role_data_scopes: Record<string, DataScopeKey>;
 }
 
 /** 在线会话（服务端只下发 token 的散列 id，不含原始 token） */

@@ -4,7 +4,15 @@ import { useConfirm } from '../components/ConfirmDialog';
 import { ROLE_LABELS, useAuth, type UserRole } from '../auth';
 import { Card, ErrorBanner, PageHeader, Spinner } from '../components/ui';
 import { Select } from '../components/Select';
-import type { AuditLogItem, AuditLogPayload, SessionItem, UserItem } from '../types';
+import type {
+  AuditLogItem,
+  AuditLogPayload,
+  DataScopeDef,
+  DataScopeKey,
+  PermissionDef,
+  SessionItem,
+  UserItem,
+} from '../types';
 import { errMsg, fmtDateTime, fmtRelative, isTruthy } from '../utils';
 
 const inputCls =
@@ -13,37 +21,88 @@ const inputCls =
 /** 离视口边缘至少留出的间距，避免下拉贴边 */
 const MENU_VIEWPORT_GAP = 8;
 
-const ROLE_META: Record<
-  UserRole,
-  { label: string; cls: string; soft: string; desc: string }
-> = {
+const ROLE_META: Record<UserRole, { label: string; cls: string; soft: string }> = {
   admin: {
     label: '管理员',
     cls: 'bg-indigo-50 text-indigo-700 border-indigo-200',
     soft: 'bg-indigo-50/80',
-    desc: '全部权限，含用户与角色配置；不可通过矩阵降权',
   },
   operator: {
     label: '运维员',
     cls: 'bg-amber-50 text-amber-800 border-amber-200',
     soft: 'bg-amber-50/60',
-    desc: '日常监控运维；具体能力由下方 RBAC 矩阵决定',
   },
   viewer: {
     label: '查看员',
     cls: 'bg-slate-100 text-slate-600 border-slate-200',
     soft: 'bg-slate-50',
-    desc: '默认可读；可单独授予确认告警等操作权限',
   },
 };
 
-interface PermDef {
-  key: string;
-  label: string;
-  desc: string;
-}
+/** 数据权限的兜底文案：角色权限接口返回前也能正常显示 */
+const DATA_SCOPE_LABELS: Record<string, string> = {
+  all: '全部数据',
+  unit: '仅本运维单位',
+  self: '仅本人创建',
+};
+
+/** 数据权限的补充说明：光看「仅本运维单位」不知道按什么过滤 */
+const DATA_SCOPE_HINTS: Record<string, string> = {
+  all: '',
+  unit: '按本人运维单位过滤',
+  self: '只看本人新建的记录',
+};
 
 type TabKey = 'accounts' | 'rbac' | 'sessions' | 'audit';
+
+interface RoleAbilities {
+  /** 功能权限：授予了哪些能力，或「无操作权限（只读）」 */
+  permText: string;
+  /** 数据权限：能看哪些数据 */
+  scopeText: string;
+}
+
+/**
+ * 把一个角色的功能权限与数据权限折成具体文案，
+ * 替代「日常监控运维」这类看不出实际权限的描述。
+ */
+function describeRole(
+  role: UserRole,
+  permDefs: PermissionDef[],
+  rolePerms: Record<string, string[]>,
+  scopeDefs: DataScopeDef[],
+  roleScopes: Record<string, DataScopeKey>,
+): RoleAbilities {
+  const keys = role === 'admin' ? permDefs.map((p) => p.key) : (rolePerms[role] ?? []);
+  const labels = permDefs.filter((p) => keys.includes(p.key)).map((p) => p.label);
+  const permText = labels.length
+    ? labels.length === permDefs.length && permDefs.length > 0
+      ? `全部 ${permDefs.length} 项（${labels.join(' · ')}）`
+      : labels.join(' · ')
+    : '无操作权限（只读）';
+
+  // 管理员固定全部数据，服务端也这么处理
+  const scope = role === 'admin' ? 'all' : (roleScopes[role] ?? 'all');
+  const label = scopeDefs.find((d) => d.key === scope)?.label ?? DATA_SCOPE_LABELS[scope] ?? scope;
+  const hint = DATA_SCOPE_HINTS[scope] ?? '';
+  return { permText, scopeText: hint ? `${label}（${hint}）` : label };
+}
+
+/** 角色卡片里的两行权限说明；只用 span，便于嵌进按钮等行内元素 */
+function AbilityLines({ permText, scopeText, className = '' }: RoleAbilities & { className?: string }) {
+  return (
+    <span className={`block text-[11px] leading-relaxed ${className}`}>
+      <span className="flex gap-1.5">
+        <span className="shrink-0 text-slate-400">功能权限</span>
+        <span className="min-w-0 text-slate-600">{permText}</span>
+      </span>
+      <span className="flex gap-1.5">
+        <span className="shrink-0 text-slate-400">数据权限</span>
+        <span className="min-w-0 text-slate-600">{scopeText}</span>
+      </span>
+    </span>
+  );
+}
 
 /** 审计动作的展示样式：危险动作红色、成功/登录绿色、普通改动靛蓝 */
 const AUDIT_META: Record<string, { label: string; cls: string }> = {
@@ -53,6 +112,7 @@ const AUDIT_META: Record<string, { label: string; cls: string }> = {
   password_change: { label: '修改本人密码', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
   'user.create': { label: '新建账号', cls: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
   'user.role': { label: '变更角色', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
+  'user.ops_unit': { label: '变更运维单位', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
   'user.password_reset': { label: '重置密码', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
   'user.disable': { label: '停用账号', cls: 'bg-rose-50 text-rose-700 border-rose-200' },
   'user.enable': { label: '启用账号', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
@@ -166,6 +226,60 @@ function samePerms(a: Record<string, string[]>, b: Record<string, string[]>): bo
   return true;
 }
 
+/** 数据权限只有三个取值，逐个比对即可 */
+function sameScopes(a: Record<string, DataScopeKey>, b: Record<string, DataScopeKey>): boolean {
+  for (const role of ['operator', 'viewer'] as const) {
+    if ((a[role] ?? 'all') !== (b[role] ?? 'all')) return false;
+  }
+  return true;
+}
+
+/** 账号「所属运维单位」输入：自由文本，另给一行台账里已有的单位做快捷填入 */
+function OpsUnitField({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+}) {
+  return (
+    <div>
+      <span className="mb-1.5 block text-sm font-medium text-slate-700">所属运维单位</span>
+      <input
+        className={inputCls}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        autoComplete="off"
+        placeholder="例如 网络中心；留空表示不设置"
+      />
+      <span className="mt-1 block text-xs text-slate-400">
+        数据权限为「仅本运维单位」时按它过滤台账与监控系统，写法需与台账里的运维单位一致；留空则在该范围下看不到数据。
+      </span>
+      {options.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-slate-400">台账里已有：</span>
+          {options.slice(0, 8).map((unit) => (
+            <button
+              key={unit}
+              type="button"
+              onClick={() => onChange(unit)}
+              className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
+                unit === value.trim()
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              {unit}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Users() {
   const { user: me } = useAuth();
   const confirm = useConfirm();
@@ -182,7 +296,12 @@ export default function Users() {
   const [newName, setNewName] = useState('');
   const [newPass, setNewPass] = useState('');
   const [newRole, setNewRole] = useState<UserRole>('viewer');
+  const [newUnit, setNewUnit] = useState('');
   const [creating, setCreating] = useState(false);
+
+  /** 单独维护某个账号的「所属运维单位」 */
+  const [unitUser, setUnitUser] = useState<UserItem | null>(null);
+  const [unitValue, setUnitValue] = useState('');
 
   const [resetUser, setResetUser] = useState<UserItem | null>(null);
   const [resetPass, setResetPass] = useState('');
@@ -198,9 +317,14 @@ export default function Users() {
     anchorTop: number;
   } | null>(null);
 
-  const [permDefs, setPermDefs] = useState<PermDef[]>([]);
+  const [permDefs, setPermDefs] = useState<PermissionDef[]>([]);
   const [rolePerms, setRolePerms] = useState<Record<string, string[]>>({});
   const [savedPerms, setSavedPerms] = useState<Record<string, string[]>>({});
+  const [dataScopeDefs, setDataScopeDefs] = useState<DataScopeDef[]>([]);
+  const [roleScopes, setRoleScopes] = useState<Record<string, DataScopeKey>>({});
+  const [savedScopes, setSavedScopes] = useState<Record<string, DataScopeKey>>({});
+  /** 台账里出现过的运维单位，供账号「所属运维单位」快捷填入 */
+  const [opsUnits, setOpsUnits] = useState<string[]>([]);
   const [permSaving, setPermSaving] = useState(false);
 
   // 在线会话
@@ -217,19 +341,31 @@ export default function Users() {
   const [auditLoading, setAuditLoading] = useState(false);
   const auditLogsRef = useRef<AuditLogItem[]>([]);
 
-  const dirty = useMemo(() => !samePerms(rolePerms, savedPerms), [rolePerms, savedPerms]);
+  const dirty = useMemo(
+    () => !samePerms(rolePerms, savedPerms) || !sameScopes(roleScopes, savedScopes),
+    [rolePerms, savedPerms, roleScopes, savedScopes],
+  );
 
   const load = useCallback(async () => {
     try {
-      const [u, r] = await Promise.all([api.getUsers(), api.getRolePermissions()]);
+      const [u, r, ou] = await Promise.all([
+        api.getUsers(),
+        api.getRolePermissions(),
+        // 候选运维单位只影响输入框的快捷填入，单独失败不拖垮整页
+        api.getOpsUnits().catch(() => ({ units: [] as string[] })),
+      ]);
       setUsers(u.users);
       setPermDefs(r.permissions);
+      setDataScopeDefs(r.data_scopes ?? []);
       setRolePerms(r.role_permissions);
       setSavedPerms({
         operator: [...(r.role_permissions.operator ?? [])],
         viewer: [...(r.role_permissions.viewer ?? [])],
         admin: [...(r.role_permissions.admin ?? [])],
       });
+      setRoleScopes(r.role_data_scopes ?? {});
+      setSavedScopes({ ...(r.role_data_scopes ?? {}) });
+      setOpsUnits(ou.units);
     } catch (e) {
       setError(errMsg(e));
     }
@@ -238,6 +374,9 @@ export default function Users() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** 当前配置下某个角色的具体权限：功能权限 + 数据权限 */
+  const abilitiesOf = (role: UserRole) => describeRole(role, permDefs, rolePerms, dataScopeDefs, roleScopes);
 
   /** 打开/收起账号行的「管理」下拉：先贴在按钮下方，渲染后再按实际高度校正 */
   const toggleMenu = (id: number, el: HTMLButtonElement) => {
@@ -377,6 +516,7 @@ export default function Users() {
     setNewName('');
     setNewPass('');
     setNewRole('viewer');
+    setNewUnit('');
     setCreateOpen(true);
     setError(null);
   };
@@ -398,7 +538,12 @@ export default function Users() {
     setCreating(true);
     setError(null);
     try {
-      const res = await api.createUser({ username: newName.trim(), password: newPass, role: newRole });
+      const res = await api.createUser({
+        username: newName.trim(),
+        password: newPass,
+        role: newRole,
+        ops_unit: newUnit.trim(),
+      });
       setUsers(res.users);
       setCreateOpen(false);
       setNotice(`已创建账号「${newName.trim()}」`);
@@ -409,11 +554,37 @@ export default function Users() {
     }
   };
 
+  /** 保存账号的「所属运维单位」；数据权限按它过滤，改完即时生效 */
+  const saveUnit = async () => {
+    if (!unitUser || pendingIds.has(unitUser.id)) return;
+    if (unitValue.trim() === (unitUser.ops_unit ?? '')) {
+      setUnitUser(null);
+      return;
+    }
+    markPending(unitUser.id, true);
+    setError(null);
+    try {
+      const res = await api.updateUser(unitUser.id, { ops_unit: unitValue.trim() });
+      setUsers(res.users);
+      setNotice(
+        unitValue.trim()
+          ? `已将「${unitUser.username}」的运维单位设为「${unitValue.trim()}」`
+          : `已清空「${unitUser.username}」的运维单位`,
+      );
+      setUnitUser(null);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      markPending(unitUser.id, false);
+    }
+  };
+
   const changeRole = async (u: UserItem, role: UserRole) => {
     if (pendingIds.has(u.id) || u.role === role) return;
+    const next = abilitiesOf(role);
     const ok = await confirm({
       title: '变更角色',
-      message: `将「${u.username}」从「${ROLE_LABELS[u.role as UserRole] ?? u.role}」改为「${ROLE_LABELS[role]}」？\n\n${ROLE_META[role].desc}\n\n该用户需重新登录后权限生效。`,
+      message: `将「${u.username}」从「${ROLE_LABELS[u.role as UserRole] ?? u.role}」改为「${ROLE_LABELS[role]}」？\n\n功能权限：${next.permText}\n数据权限：${next.scopeText}\n\n保存后服务端立即生效；对方已打开的页面需刷新（或重新登录），菜单与按钮才会跟着变。`,
       confirmText: '确认变更',
     });
     if (!ok) return;
@@ -584,6 +755,7 @@ export default function Users() {
       viewer: [...(savedPerms.viewer ?? [])],
       admin: [...(savedPerms.admin ?? [])],
     });
+    setRoleScopes({ ...savedScopes });
   };
 
   const savePerms = async () => {
@@ -591,7 +763,7 @@ export default function Users() {
     const ok = await confirm({
       title: '保存角色权限',
       message:
-        '将更新运维员与查看员的权限集。\n\n已登录的对应用户需重新登录后生效；管理员权限始终为全部，不受影响。',
+        '将更新运维员与查看员的功能权限与数据权限。\n\n保存后服务端立即生效；对应用户已打开的页面需刷新（或重新登录），菜单与按钮才会跟着变。管理员始终为全部权限与全部数据，不受影响。',
       confirmText: '保存变更',
     });
     if (!ok) return;
@@ -601,6 +773,10 @@ export default function Users() {
       const res = await api.updateRolePermissions({
         operator: rolePerms.operator ?? [],
         viewer: rolePerms.viewer ?? [],
+        data_scopes: {
+          operator: roleScopes.operator ?? 'all',
+          viewer: roleScopes.viewer ?? 'all',
+        },
       });
       setRolePerms(res.role_permissions);
       setSavedPerms({
@@ -608,6 +784,8 @@ export default function Users() {
         viewer: [...(res.role_permissions.viewer ?? [])],
         admin: [...(res.role_permissions.admin ?? [])],
       });
+      setRoleScopes(res.role_data_scopes ?? {});
+      setSavedScopes({ ...(res.role_data_scopes ?? {}) });
       setNotice('角色权限已保存');
     } catch (e) {
       setError(errMsg(e));
@@ -621,7 +799,7 @@ export default function Users() {
     if (tab === 'rbac' && dirty) {
       const ok = await confirm({
         title: '未保存的权限变更',
-        message: '角色权限矩阵有未保存修改，离开将丢弃这些更改。',
+        message: '功能权限与数据权限有未保存修改，离开将丢弃这些更改。',
         confirmText: '丢弃并离开',
         danger: true,
       });
@@ -635,7 +813,7 @@ export default function Users() {
     <div className="mx-auto max-w-5xl">
       <PageHeader
         title="用户与权限"
-        description="账号归属角色，能力由 RBAC 矩阵授予。管理员始终拥有全部权限。"
+        description="账号归属角色；角色决定功能权限（能做什么）与数据权限（能看哪些数据）。管理员始终为全部权限、全部数据。"
         actions={
           tab === 'accounts' ? (
             <button
@@ -719,15 +897,18 @@ export default function Users() {
       {tab === 'accounts' && (
         <>
           <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            {(['admin', 'operator', 'viewer'] as UserRole[]).map((role) => (
-              <div key={role} className={`rounded-xl border border-slate-200 px-4 py-3 ${ROLE_META[role].soft}`}>
-                <div className="flex items-center justify-between">
-                  <RoleBadge role={role} />
-                  <span className="text-lg font-semibold tabular-nums text-slate-900">{counts[role]}</span>
+            {(['admin', 'operator', 'viewer'] as UserRole[]).map((role) => {
+              const ability = abilitiesOf(role);
+              return (
+                <div key={role} className={`rounded-xl border border-slate-200 px-4 py-3 ${ROLE_META[role].soft}`}>
+                  <div className="flex items-center justify-between">
+                    <RoleBadge role={role} />
+                    <span className="text-lg font-semibold tabular-nums text-slate-900">{counts[role]}</span>
+                  </div>
+                  <AbilityLines {...ability} className="mt-2" />
                 </div>
-                <p className="mt-2 text-[11px] leading-relaxed text-slate-500">{ROLE_META[role].desc}</p>
-              </div>
-            ))}
+              );
+            })}
             <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
               <div className="flex items-center justify-between">
                 <span
@@ -787,7 +968,10 @@ export default function Users() {
                             </span>
                           )}
                         </div>
-                        <p className="mt-0.5 text-xs text-slate-400">创建于 {fmtDateTime(u.created_at)}</p>
+                        <p className="mt-0.5 text-xs text-slate-400">
+                          创建于 {fmtDateTime(u.created_at)} · 运维单位：
+                          {u.ops_unit ? <span className="text-slate-500">{u.ops_unit}</span> : <span className="text-amber-600">未设置</span>}
+                        </p>
                       </div>
 
                       <div className="relative shrink-0">
@@ -855,6 +1039,20 @@ export default function Users() {
                                 title={roleLocked ? '仅管理员可以修改管理员账号' : undefined}
                                 onClick={() => {
                                   setMenu(null);
+                                  setUnitUser(u);
+                                  setUnitValue(u.ops_unit ?? '');
+                                  setError(null);
+                                }}
+                                className="block w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+                              >
+                                设置运维单位
+                              </button>
+                              <button
+                                type="button"
+                                disabled={roleLocked}
+                                title={roleLocked ? '仅管理员可以修改管理员账号' : undefined}
+                                onClick={() => {
+                                  setMenu(null);
                                   setResetUser(u);
                                   setResetPass('');
                                   setResetConfirm('');
@@ -896,6 +1094,7 @@ export default function Users() {
                 role === 'admin'
                   ? permDefs.length
                   : (rolePerms[role] ?? []).filter((k) => permDefs.some((p) => p.key === k)).length;
+              const ability = abilitiesOf(role);
               return (
                 <div key={role} className="rounded-xl border border-slate-200 bg-white px-4 py-3">
                   <div className="flex items-center justify-between">
@@ -904,7 +1103,7 @@ export default function Users() {
                       {n}/{permDefs.length || '—'} 项
                     </span>
                   </div>
-                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">{ROLE_META[role].desc}</p>
+                  <AbilityLines {...ability} className="mt-2" />
                 </div>
               );
             })}
@@ -912,9 +1111,67 @@ export default function Users() {
 
           <Card className="overflow-hidden">
             <div className="border-b border-slate-100 px-5 py-4">
-              <h3 className="text-sm font-semibold text-slate-900">权限矩阵</h3>
+              <h3 className="text-sm font-semibold text-slate-900">数据权限</h3>
               <p className="mt-0.5 text-xs text-slate-400">
-                勾选即为授予。管理员列锁定为全部权限；修改后需点右上角保存。
+                决定角色能看到哪些台账与监控系统，与上面的功能权限相互独立；管理员固定为全部数据。
+              </p>
+            </div>
+            <div className="divide-y divide-slate-50">
+              {(['admin', 'operator', 'viewer'] as UserRole[]).map((role) => {
+                const locked = role === 'admin';
+                const current = locked ? 'all' : (roleScopes[role] ?? 'all');
+                const activeDef = dataScopeDefs.find((d) => d.key === current);
+                return (
+                  <div key={role} className="flex flex-col gap-2 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <RoleBadge role={role} />
+                        {locked && <span className="text-[11px] text-slate-400">固定全部数据</span>}
+                      </div>
+                      <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                        {activeDef?.desc ?? DATA_SCOPE_LABELS[current]}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
+                      {(dataScopeDefs.length
+                        ? dataScopeDefs
+                        : (['all', 'unit', 'self'] as DataScopeKey[]).map((key) => ({
+                            key,
+                            label: DATA_SCOPE_LABELS[key],
+                            desc: '',
+                          }))
+                      ).map((def) => {
+                        const on = def.key === current;
+                        return (
+                          <button
+                            key={def.key}
+                            type="button"
+                            disabled={locked}
+                            aria-pressed={on}
+                            onClick={() => setRoleScopes((prev) => ({ ...prev, [role]: def.key }))}
+                            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed ${
+                              on ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-white hover:text-slate-900'
+                            } ${locked && !on ? 'opacity-40' : ''}`}
+                          >
+                            {def.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="border-t border-amber-100 bg-amber-50/70 px-5 py-3 text-xs leading-relaxed text-amber-800">
+              「仅本运维单位」按账号的「所属运维单位」过滤，未设置单位的账号在该范围下看不到任何台账与监控；「仅本人创建」只看本人新建的记录，历史数据没有创建人，对任何人都不可见。
+            </p>
+          </Card>
+
+          <Card className="overflow-hidden">
+            <div className="border-b border-slate-100 px-5 py-4">
+              <h3 className="text-sm font-semibold text-slate-900">功能权限矩阵</h3>
+              <p className="mt-0.5 text-xs text-slate-400">
+                勾选即为授予。管理员列锁定为全部权限；功能权限与数据权限改动后需点右上角一起保存。
               </p>
             </div>
             {permDefs.length === 0 ? (
@@ -1217,7 +1474,7 @@ export default function Users() {
       {createOpen && (
         <Modal
           title="新建用户"
-          description="创建后即可用该账号登录。角色决定初始能力，可在「角色权限」中微调。"
+          description="创建后即可用该账号登录。角色决定功能权限与数据权限，可在「角色权限」中调整。"
           onClose={() => !creating && setCreateOpen(false)}
           footer={
             <>
@@ -1265,6 +1522,7 @@ export default function Users() {
             <div className="space-y-2">
               {(['viewer', 'operator', 'admin'] as UserRole[]).map((role) => {
                 const blocked = role === 'admin' && !isAdminActor;
+                const ability = abilitiesOf(role);
                 return (
                   <button
                     key={role}
@@ -1285,9 +1543,9 @@ export default function Users() {
                     >
                       {newRole === role && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
                     </span>
-                    <span>
+                    <span className="min-w-0">
                       <span className="block text-sm font-medium text-slate-900">{ROLE_LABELS[role]}</span>
-                      <span className="mt-0.5 block text-xs text-slate-500">{ROLE_META[role].desc}</span>
+                      <AbilityLines {...ability} className="mt-0.5" />
                       {blocked && <span className="mt-0.5 block text-xs text-amber-600">只有管理员能创建管理员</span>}
                     </span>
                   </button>
@@ -1295,6 +1553,38 @@ export default function Users() {
               })}
             </div>
           </Field>
+          <OpsUnitField value={newUnit} onChange={setNewUnit} options={opsUnits} />
+        </Modal>
+      )}
+
+      {unitUser && (
+        <Modal
+          title={`所属运维单位 · ${unitUser.username}`}
+          description="数据权限为「仅本运维单位」时，该账号只能看到这个单位名下的台账与监控系统。"
+          onClose={() => !pendingIds.has(unitUser.id) && setUnitUser(null)}
+          footer={
+            <>
+              <button
+                type="button"
+                disabled={pendingIds.has(unitUser.id)}
+                onClick={() => setUnitUser(null)}
+                className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={pendingIds.has(unitUser.id)}
+                onClick={() => void saveUnit()}
+                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-40"
+              >
+                {pendingIds.has(unitUser.id) && <Spinner className="border-white/40 border-t-white" />}
+                保存
+              </button>
+            </>
+          }
+        >
+          <OpsUnitField value={unitValue} onChange={setUnitValue} options={opsUnits} />
         </Modal>
       )}
 
