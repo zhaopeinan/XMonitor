@@ -1,6 +1,7 @@
 import { db } from './db';
 import { getSetting } from './settings';
 import { fetchParentHourlyOk, fetchProbeStats24h, fetchTrend12h, vmEnabled } from './vm';
+import { isUnfiltered, systemScopeSql, type DataScopeCtx } from './scope';
 import type {
   AlertRow,
   ExpectMode,
@@ -247,13 +248,27 @@ function mergeTrend(sqlite: ScreenTrendPoint[], vm: ScreenTrendPoint[] | null): 
   });
 }
 
-export async function buildScreen(): Promise<ScreenData> {
+/**
+ * 大屏聚合数据。
+ * 台账 / 监控系统 / 告警相关的统计都按调用者的数据权限过滤；
+ * 大模型渠道不归属运维单位，保持全局可见。
+ */
+export async function buildScreen(scope?: DataScopeCtx): Promise<ScreenData> {
   const now = Date.now();
   const dayAgo = now - 24 * 3600 * 1000;
   const slowThreshold = Number(getSetting('slow_threshold_ms')) || 3000;
 
-  const systems = db.prepare('SELECT * FROM systems ORDER BY id').all() as SystemRow[];
-  const monitors = db.prepare('SELECT * FROM monitors ORDER BY id').all() as MonitorRow[];
+  const filter = scope ? systemScopeSql(scope, 's') : { sql: '1=1', params: [] as unknown[] };
+  const systems = db
+    .prepare(`SELECT s.* FROM systems s WHERE ${filter.sql} ORDER BY s.id`)
+    .all(...filter.params) as SystemRow[];
+  const visibleSystemIds = new Set(systems.map((s) => s.id));
+  // 监控项、检查记录、告警都跟着所属监控系统走：把不在范围内的行全部挡在聚合之前，
+  // 后面的 KPI / 时间线 / 趋势就自然只统计可见数据
+  const monitors = (db.prepare('SELECT * FROM monitors ORDER BY id').all() as MonitorRow[]).filter((m) =>
+    visibleSystemIds.has(m.system_id),
+  );
+  const visibleMonitorIds = new Set(monitors.map((m) => m.id));
   const expectByMonitor = new Map(monitors.map((m) => [m.id, expectOf(m)]));
 
   const channels = db.prepare('SELECT * FROM llm_channels ORDER BY id').all() as LlmChannelRow[];
@@ -270,19 +285,23 @@ export async function buildScreen(): Promise<ScreenData> {
         fetchProbeStats24h('llm'),
         fetchParentHourlyOk('monitor', now),
         fetchParentHourlyOk('llm', now),
-        fetchTrend12h(now),
+        // 趋势是全站平均线：数据范围受限时必须带上可见系统，否则会混进其他单位的数据
+        fetchTrend12h(now, scope ? [...visibleSystemIds] : null),
       ])
     : [null, null, null, null, null];
 
-  const statRows = db
-    .prepare(
-      `SELECT monitor_id, COUNT(*) AS total, SUM(ok) AS ok_count, AVG(latency_ms) AS avg_latency
+  const statRows = (
+    db
+      .prepare(
+        `SELECT monitor_id, COUNT(*) AS total, SUM(ok) AS ok_count, AVG(latency_ms) AS avg_latency
        FROM checks WHERE ts >= ? GROUP BY monitor_id`,
-    )
-    .all(dayAgo) as CheckStatRow[];
+      )
+      .all(dayAgo) as CheckStatRow[]
+  ).filter((r) => visibleMonitorIds.has(r.monitor_id));
   const statByMonitor = new Map(statRows.map((r) => [r.monitor_id, r]));
   if (vmMonStats && vmMonStats.size > 0) {
     for (const [id, st] of vmMonStats) {
+      if (!visibleMonitorIds.has(id)) continue;
       const existing = statByMonitor.get(id);
       // VM 上线初期序列短于 SQLite 时，保留更完整的 24h 统计
       if (existing && existing.total > st.total) continue;
@@ -315,13 +334,15 @@ export async function buildScreen(): Promise<ScreenData> {
     }
   }
 
-  const checkRows = db
-    .prepare(
-      `SELECT c.monitor_id, c.ts, c.ok, c.latency_ms, m.system_id
+  const checkRows = (
+    db
+      .prepare(
+        `SELECT c.monitor_id, c.ts, c.ok, c.latency_ms, m.system_id
        FROM checks c JOIN monitors m ON m.id = c.monitor_id
        WHERE c.ts >= ? ORDER BY c.ts`,
-    )
-    .all(dayAgo) as { monitor_id: number; ts: number; ok: number; latency_ms: number | null; system_id: number }[];
+      )
+      .all(dayAgo) as { monitor_id: number; ts: number; ok: number; latency_ms: number | null; system_id: number }[]
+  ).filter((c) => visibleMonitorIds.has(c.monitor_id));
 
   const llmCheckRows = db
     .prepare(
@@ -650,7 +671,17 @@ export async function buildScreen(): Promise<ScreenData> {
   const overallTotal = allTotal + llmTotal;
   const overallMeet = allMeet + llmMeet;
 
-  const unackedSys = db.prepare('SELECT COUNT(*) AS n FROM alerts WHERE acknowledged = 0').get() as { n: number };
+  const unackedSysFiltered = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM alerts a
+       JOIN monitors m ON m.id = a.monitor_id
+       JOIN systems s ON s.id = m.system_id
+       WHERE a.acknowledged = 0 AND ${filter.sql}`,
+    )
+    .get(...filter.params) as { n: number };
+  const unackedSys = isUnfiltered(filter)
+    ? (db.prepare('SELECT COUNT(*) AS n FROM alerts WHERE acknowledged = 0').get() as { n: number })
+    : unackedSysFiltered;
   const unackedLlm = db.prepare('SELECT COUNT(*) AS n FROM llm_alerts WHERE acknowledged = 0').get() as { n: number };
 
   const sysAlerts = db
@@ -659,9 +690,10 @@ export async function buildScreen(): Promise<ScreenData> {
        FROM alerts a
        JOIN monitors m ON m.id = a.monitor_id
        JOIN systems s ON s.id = m.system_id
+       WHERE ${filter.sql}
        ORDER BY a.acknowledged ASC, a.ts DESC LIMIT 12`,
     )
-    .all() as (Pick<AlertRow, 'id' | 'ts' | 'kind' | 'message' | 'acknowledged'> & {
+    .all(...filter.params) as (Pick<AlertRow, 'id' | 'ts' | 'kind' | 'message' | 'acknowledged'> & {
     monitor_name: string;
     system_name: string;
   })[];

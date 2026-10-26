@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS systems (
   base_url TEXT NOT NULL,
   use_sso INTEGER NOT NULL DEFAULT 1,
   auth_token TEXT,
+  ops_unit TEXT NOT NULL DEFAULT '',
+  created_by INTEGER,
   created_at INTEGER NOT NULL
 );
 -- 系统台账：资产登记，与监控系统（systems）独立，可选关联
@@ -35,6 +37,7 @@ CREATE TABLE IF NOT EXISTS system_ledgers (
   location TEXT NOT NULL DEFAULT '',
   remark TEXT NOT NULL DEFAULT '',
   system_id INTEGER REFERENCES systems(id) ON DELETE SET NULL,
+  created_by INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -155,6 +158,9 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'viewer',
+  disabled INTEGER NOT NULL DEFAULT 0,
+  -- 所属运维单位：数据权限「仅本运维单位」按它比对台账与监控系统
+  ops_unit TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -224,6 +230,11 @@ for (const sql of [
   'ALTER TABLE system_ledgers ADD COLUMN cert_expires_at INTEGER',
   "ALTER TABLE system_ledgers ADD COLUMN cert_evidence TEXT NOT NULL DEFAULT ''",
   'ALTER TABLE system_ledgers ADD COLUMN https_checked_at INTEGER',
+  // 数据权限：账号所属运维单位，以及台账/监控系统的创建人（「仅本人创建」范围用）
+  "ALTER TABLE users ADD COLUMN ops_unit TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE systems ADD COLUMN ops_unit TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE systems ADD COLUMN created_by INTEGER',
+  'ALTER TABLE system_ledgers ADD COLUMN created_by INTEGER',
 ]) {
   try {
     db.exec(sql);

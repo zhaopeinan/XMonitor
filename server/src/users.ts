@@ -261,14 +261,15 @@ export type UserBrief = Omit<UserRow, 'password_hash'>;
 
 export function listUsers(): UserBrief[] {
   return db
-    .prepare('SELECT id, username, role, disabled, created_at FROM users ORDER BY id')
+    .prepare('SELECT id, username, role, disabled, ops_unit, created_at FROM users ORDER BY id')
     .all() as UserBrief[];
 }
 
 export function getUserBrief(id: number): UserBrief | null {
   return (
-    (db.prepare('SELECT id, username, role, disabled, created_at FROM users WHERE id = ?').get(id) as UserBrief | undefined) ??
-    null
+    (db
+      .prepare('SELECT id, username, role, disabled, ops_unit, created_at FROM users WHERE id = ?')
+      .get(id) as UserBrief | undefined) ?? null
   );
 }
 
@@ -283,11 +284,12 @@ function roleOf(userId: number): UserRole | null {
 }
 
 export function createUser(
-  username: string,
-  password: string,
-  role: string,
+  input: { username: string; password: string; role: string; opsUnit?: string },
   actorRole: UserRole | null,
 ): { ok: boolean; error?: string } {
+  const username = input.username;
+  const password = input.password;
+  const role = input.role;
   if (!/^[a-zA-Z0-9_.-]{2,32}$/.test(username)) return { ok: false, error: '用户名需为 2-32 位字母、数字或 _.-' };
   if (password.length < 6) return { ok: false, error: '密码至少 6 位' };
   if (!isValidRole(role)) return { ok: false, error: '角色必须是 admin / operator / viewer' };
@@ -295,18 +297,24 @@ export function createUser(
   if (role === 'admin' && actorRole !== 'admin') return { ok: false, error: '仅管理员可以创建管理员账号' };
   const exists = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
   if (exists) return { ok: false, error: '用户名已存在' };
-  db.prepare('INSERT INTO users(username, password_hash, role, created_at) VALUES (?, ?, ?, ?)').run(
+  db.prepare('INSERT INTO users(username, password_hash, role, ops_unit, created_at) VALUES (?, ?, ?, ?, ?)').run(
     username,
     hashPassword(password),
     role,
+    normalizeOpsUnit(input.opsUnit),
     Date.now(),
   );
   return { ok: true };
 }
 
+/** 运维单位是自由文本，只做去空格与长度限制；写法和台账里的「运维单位」保持一致即可 */
+export function normalizeOpsUnit(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim().slice(0, 120) : '';
+}
+
 export function updateUser(
   id: number,
-  patch: { role?: string; password?: string; disabled?: boolean },
+  patch: { role?: string; password?: string; disabled?: boolean; opsUnit?: string },
   actorId: number,
 ): { ok: boolean; error?: string } {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
@@ -347,6 +355,9 @@ export function updateUser(
       // 停用后立刻踢下线，避免旧会话继续访问
       if (next === 1) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
     }
+  }
+  if (patch.opsUnit !== undefined) {
+    db.prepare('UPDATE users SET ops_unit = ? WHERE id = ?').run(normalizeOpsUnit(patch.opsUnit), id);
   }
   return { ok: true };
 }

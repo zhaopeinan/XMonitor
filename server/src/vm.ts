@@ -226,8 +226,12 @@ export async function fetchParentHourlyOk(
   return map;
 }
 
-/** 12h 趋势：30min 粒度全局平均延迟 + 失败率近似 */
-export async function fetchTrend12h(nowMs = Date.now()): Promise<
+/**
+ * 12h 趋势：30min 粒度全局平均延迟 + 失败率近似。
+ * parentIds 传入系统 id 列表时只统计这些系统的探针（数据权限受限的调用者），
+ * 传 null 表示不限制；传空数组表示没有可见系统，直接返回 null 而不是全站数据。
+ */
+export async function fetchTrend12h(nowMs = Date.now(), parentIds: number[] | null = null): Promise<
   | {
       ts: number;
       avg_latency_ms: number | null;
@@ -239,12 +243,14 @@ export async function fetchTrend12h(nowMs = Date.now()): Promise<
     }[]
   | null
 > {
+  if (parentIds && parentIds.length === 0) return null;
+  const parentFilter = parentIds ? `,parent=~"${parentIds.map((id) => escLabel(String(id))).join('|')}"` : '';
   const end = Math.floor(nowMs / 1000);
   const start = end - 12 * 3600;
   const [bizLat, llmLat, bizOk, llmOk] = await Promise.all([
-    queryRange(`avg(avg_over_time(xmonitor_probe_latency_ms{kind="monitor"}[30m]))`, start, end, '30m'),
+    queryRange(`avg(avg_over_time(xmonitor_probe_latency_ms{kind="monitor"${parentFilter}}[30m]))`, start, end, '30m'),
     queryRange(`avg(avg_over_time(xmonitor_probe_latency_ms{kind="llm"}[30m]))`, start, end, '30m'),
-    queryRange(`avg(avg_over_time(xmonitor_probe_ok{kind="monitor"}[30m]))`, start, end, '30m'),
+    queryRange(`avg(avg_over_time(xmonitor_probe_ok{kind="monitor"${parentFilter}}[30m]))`, start, end, '30m'),
     queryRange(`avg(avg_over_time(xmonitor_probe_ok{kind="llm"}[30m]))`, start, end, '30m'),
   ]);
   if (!bizLat && !llmLat && !bizOk && !llmOk) return null;

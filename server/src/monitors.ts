@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from './db';
 import { getSetting } from './settings';
 import { requirePermission } from './users';
+import { OUT_OF_SCOPE_ERROR, dataScopeOf, monitorInScope, systemInScope } from './scope';
 import type { CandidateRow, MonitorRow } from './types';
 
 export const monitorsRouter = Router();
@@ -11,6 +12,7 @@ monitorsRouter.post('/systems/:id/monitors', requirePermission('systems.manage')
   const systemId = Number(req.params.id);
   const system = db.prepare('SELECT id FROM systems WHERE id = ?').get(systemId);
   if (!system) return res.status(404).json({ error: '系统不存在' });
+  if (!systemInScope(dataScopeOf(req.user!), systemId)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
 
   const ids: number[] = Array.isArray(req.body?.candidate_ids) ? req.body.candidate_ids.map(Number).filter(Number.isFinite) : [];
   if (ids.length === 0) return res.status(400).json({ error: 'candidate_ids 不能为空' });
@@ -41,6 +43,7 @@ monitorsRouter.patch('/monitors/:id', requirePermission('systems.manage'), (req,
   const id = Number(req.params.id);
   const monitor = db.prepare('SELECT * FROM monitors WHERE id = ?').get(id) as MonitorRow | undefined;
   if (!monitor) return res.status(404).json({ error: '监控不存在' });
+  if (!monitorInScope(dataScopeOf(req.user!), id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
 
   const fields: Record<string, (v: unknown) => unknown> = {
     name: (v) => (typeof v === 'string' && v ? v : undefined),
@@ -71,6 +74,9 @@ monitorsRouter.patch('/monitors/:id', requirePermission('systems.manage'), (req,
 
 monitorsRouter.delete('/monitors/:id', requirePermission('systems.manage'), (req, res) => {
   const id = Number(req.params.id);
+  const exists = db.prepare('SELECT id FROM monitors WHERE id = ?').get(id);
+  if (!exists) return res.status(404).json({ error: '监控不存在' });
+  if (!monitorInScope(dataScopeOf(req.user!), id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   const info = db.prepare('DELETE FROM monitors WHERE id = ?').run(id);
   if (info.changes === 0) return res.status(404).json({ error: '监控不存在' });
   db.prepare('DELETE FROM checks WHERE monitor_id = ?').run(id);
@@ -83,6 +89,7 @@ monitorsRouter.post('/systems/:id/reverse', requirePermission('systems.manage'),
   const systemId = Number(req.params.id);
   const system = db.prepare('SELECT id FROM systems WHERE id = ?').get(systemId);
   if (!system) return res.status(404).json({ error: '系统不存在' });
+  if (!systemInScope(dataScopeOf(req.user!), systemId)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
 
   const enabled = req.body?.enabled;
   const mode = enabled === true || enabled === 1 || enabled === 'true' || enabled === 'down' ? 'down' : 'up';
@@ -125,6 +132,7 @@ monitorsRouter.get('/monitors/:id/checks', (req, res) => {
   const id = Number(req.params.id);
   const monitor = db.prepare('SELECT id FROM monitors WHERE id = ?').get(id);
   if (!monitor) return res.status(404).json({ error: '监控不存在' });
+  if (!monitorInScope(dataScopeOf(req.user!), id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   const hours = Math.min(24 * 30, Math.max(1, Number(req.query.hours) || 24));
   const since = Date.now() - hours * 3600 * 1000;
   const checks = db

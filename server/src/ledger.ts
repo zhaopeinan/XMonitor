@@ -4,6 +4,7 @@ import { isIP } from 'node:net';
 import { probeHttpsTargets, type CertInfo, type HttpsTarget } from './certProbe';
 import { db } from './db';
 import { requirePermission } from './users';
+import { OUT_OF_SCOPE_ERROR, dataScopeOf, ledgerIdsInScope, ledgerInScope, ledgerScopeSql } from './scope';
 import type { SystemLedgerRow } from './types';
 
 export const ledgerRouter = Router();
@@ -169,6 +170,10 @@ function readEntryInput(body: unknown, existing?: SystemLedgerRow): Validated<En
 ledgerRouter.get('/ledger', (req, res) => {
   const clauses: string[] = [];
   const params: unknown[] = [];
+  // 数据权限：台账按角色的数据范围过滤（全部 / 本运维单位 / 本人创建）
+  const scope = ledgerScopeSql(dataScopeOf(req.user!), 'l');
+  clauses.push(scope.sql);
+  params.push(...scope.params);
   if (req.query.system_id !== undefined && req.query.system_id !== '') {
     const systemId = Number(req.query.system_id);
     if (!Number.isInteger(systemId) || systemId <= 0) return res.status(400).json({ error: 'system_id 不合法' });
@@ -187,6 +192,7 @@ ledgerRouter.get('/ledger', (req, res) => {
 ledgerRouter.get('/ledger/:id', (req, res) => {
   const entry = getEntry(Number(req.params.id));
   if (!entry) return res.status(404).json({ error: '台账条目不存在' });
+  if (!ledgerInScope(dataScopeOf(req.user!), entry.id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   res.json(entry);
 });
 
@@ -197,8 +203,8 @@ ledgerRouter.post('/ledger', requirePermission('ledger.manage'), (req, res) => {
   const v = input.value;
   const info = db
     .prepare(
-      `INSERT INTO system_ledgers(name, ops_unit, ip, external_access, domain_applied, domain, location, remark, system_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO system_ledgers(name, ops_unit, ip, external_access, domain_applied, domain, location, remark, system_id, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       v.name,
@@ -210,6 +216,7 @@ ledgerRouter.post('/ledger', requirePermission('ledger.manage'), (req, res) => {
       v.location,
       v.remark,
       v.system_id,
+      req.user!.id,
       now,
       now,
     );
@@ -220,6 +227,7 @@ ledgerRouter.patch('/ledger/:id', requirePermission('ledger.manage'), (req, res)
   const id = Number(req.params.id);
   const existing = db.prepare('SELECT * FROM system_ledgers WHERE id = ?').get(id) as SystemLedgerRow | undefined;
   if (!existing) return res.status(404).json({ error: '台账条目不存在' });
+  if (!ledgerInScope(dataScopeOf(req.user!), id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   const input = readEntryInput(req.body, existing);
   if (!input.ok) return res.status(400).json({ error: input.error });
   const v = input.value;
@@ -244,8 +252,11 @@ ledgerRouter.patch('/ledger/:id', requirePermission('ledger.manage'), (req, res)
 });
 
 ledgerRouter.delete('/ledger/:id', requirePermission('ledger.manage'), (req, res) => {
-  const info = db.prepare('DELETE FROM system_ledgers WHERE id = ?').run(Number(req.params.id));
-  if (info.changes === 0) return res.status(404).json({ error: '台账条目不存在' });
+  const id = Number(req.params.id);
+  const exists = db.prepare('SELECT id FROM system_ledgers WHERE id = ?').get(id);
+  if (!exists) return res.status(404).json({ error: '台账条目不存在' });
+  if (!ledgerInScope(dataScopeOf(req.user!), id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
+  db.prepare('DELETE FROM system_ledgers WHERE id = ?').run(id);
   res.json({ ok: true });
 });
 
@@ -334,9 +345,10 @@ const SCAN_CONCURRENCY = 8;
 /**
  * 单条扫描结果的状态：
  * fill=IP 为空可补上、change=与已有 IP 不同、same=与已有 IP 一致、
- * skipped=没有可解析的域名、error=解析失败、missing=条目已被删除
+ * skipped=没有可解析的域名、error=解析失败、missing=条目已被删除、
+ * denied=不在当前用户的数据范围内（请求里混进了范围外的条目）
  */
-type ScanStatus = 'fill' | 'change' | 'same' | 'skipped' | 'error' | 'missing';
+type ScanStatus = 'fill' | 'change' | 'same' | 'skipped' | 'error' | 'missing' | 'denied';
 
 interface ScanResultItem {
   id: number;
@@ -434,9 +446,25 @@ ledgerRouter.post('/ledger/scan-ips', requirePermission('ledger.manage'), async 
     .prepare(`SELECT * FROM system_ledgers WHERE id IN (${placeholders})`)
     .all(...ids) as SystemLedgerRow[];
   const byId = new Map(rows.map((row) => [row.id, row]));
+  // 批量接口也要守数据范围：范围外的条目一律不查 DNS，直接标 denied
+  const inScope = ledgerIdsInScope(dataScopeOf(req.user!), ids);
 
   const results = await mapLimit(ids, SCAN_CONCURRENCY, async (id): Promise<ScanResultItem> => {
     const row = byId.get(id);
+    if (!inScope.get(id)) {
+      return {
+        id,
+        name: row?.name ?? `#${id}`,
+        domain: row?.domain ?? '',
+        host: null,
+        current_ip: row?.ip ?? '',
+        resolved_ip: null,
+        addresses: [],
+        status: 'denied',
+        message: OUT_OF_SCOPE_ERROR,
+        elapsed_ms: 0,
+      };
+    }
     if (!row) {
       return {
         id,
@@ -454,12 +482,13 @@ ledgerRouter.post('/ledger/scan-ips', requirePermission('ledger.manage'), async 
     return scanEntry(row);
   });
 
-  const summary = { total: results.length, fill: 0, change: 0, same: 0, skipped: 0, failed: 0 };
+  const summary = { total: results.length, fill: 0, change: 0, same: 0, skipped: 0, failed: 0, denied: 0 };
   for (const item of results) {
     if (item.status === 'fill') summary.fill += 1;
     else if (item.status === 'change') summary.change += 1;
     else if (item.status === 'same') summary.same += 1;
     else if (item.status === 'skipped') summary.skipped += 1;
+    else if (item.status === 'denied') summary.denied += 1;
     else summary.failed += 1;
   }
   res.json({ results, summary });
@@ -501,11 +530,17 @@ ledgerRouter.post('/ledger/scan-ips/apply', requirePermission('ledger.manage'), 
   const now = Date.now();
   const selectStatement = db.prepare('SELECT ip, remark FROM system_ledgers WHERE id = ?');
   const updateStatement = db.prepare('UPDATE system_ledgers SET ip = ?, remark = ?, updated_at = ? WHERE id = ?');
+  const inScope = ledgerIdsInScope(dataScopeOf(req.user!), updates.map((u) => u.id));
   let updated = 0;
   let overwritten = 0;
+  let denied = 0;
   const missing: number[] = [];
   const applyAll = db.transaction((rows: { id: number; ip: string }[]) => {
     for (const row of rows) {
+      if (!inScope.get(row.id)) {
+        denied += 1;
+        continue;
+      }
       const current = selectStatement.get(row.id) as { ip: string; remark: string } | undefined;
       if (!current) {
         missing.push(row.id);
@@ -521,7 +556,7 @@ ledgerRouter.post('/ledger/scan-ips/apply', requirePermission('ledger.manage'), 
   });
   applyAll(updates);
 
-  res.json({ updated, missing, overwritten });
+  res.json({ updated, missing, overwritten, denied });
 });
 
 // ---- HTTPS / 证书探测：TLS 握手确认是否支持 HTTPS，并读取证书有效期，确认后再写回 ----
@@ -670,9 +705,28 @@ ledgerRouter.post('/ledger/probe-https', requirePermission('ledger.manage'), asy
     .prepare(`SELECT * FROM system_ledgers WHERE id IN (${placeholders})`)
     .all(...ids) as SystemLedgerRow[];
   const byId = new Map(rows.map((row) => [row.id, row]));
+  // 批量接口也要守数据范围：范围外的条目一律不做 TLS 探测，直接标 denied
+  const inScope = ledgerIdsInScope(dataScopeOf(req.user!), ids);
 
   const results = await mapLimit(ids, HTTPS_PROBE_CONCURRENCY, async (id): Promise<HttpsProbeItem> => {
     const row = byId.get(id);
+    if (!inScope.get(id)) {
+      return {
+        id,
+        name: row?.name ?? `#${id}`,
+        ip: row?.ip ?? '',
+        domain: row?.domain ?? '',
+        target: null,
+        current_supported: '',
+        current_expires_at: null,
+        https: '',
+        cert: null,
+        evidence: [],
+        status: 'denied',
+        message: OUT_OF_SCOPE_ERROR,
+        elapsed_ms: 0,
+      };
+    }
     if (!row) {
       return {
         id,
@@ -704,6 +758,7 @@ ledgerRouter.post('/ledger/probe-https', requirePermission('ledger.manage'), asy
     expired: 0,
     expiring: 0,
     failed: 0,
+    denied: 0,
   };
   for (const item of results) {
     if (item.https === 'yes') summary.yes += 1;
@@ -712,6 +767,7 @@ ledgerRouter.post('/ledger/probe-https', requirePermission('ledger.manage'), asy
     if (item.status === 'fill') summary.fill += 1;
     else if (item.status === 'change') summary.change += 1;
     else if (item.status === 'same') summary.same += 1;
+    else if (item.status === 'denied') summary.denied += 1;
     if (item.cert && item.cert.daysLeft !== null) {
       if (item.cert.daysLeft < 0) summary.expired += 1;
       else if (item.cert.daysLeft <= 30) summary.expiring += 1;
@@ -775,10 +831,16 @@ ledgerRouter.post('/ledger/probe-https/apply', requirePermission('ledger.manage'
   const updateStatement = db.prepare(
     'UPDATE system_ledgers SET https_supported = ?, cert_expires_at = ?, cert_evidence = ?, https_checked_at = ?, updated_at = ? WHERE id = ?',
   );
+  const inScope = ledgerIdsInScope(dataScopeOf(req.user!), updates.map((u) => u.id));
   let updated = 0;
+  let denied = 0;
   const missing: number[] = [];
   const applyAll = db.transaction((rows: typeof updates) => {
     for (const row of rows) {
+      if (!inScope.get(row.id)) {
+        denied += 1;
+        continue;
+      }
       const current = selectStatement.get(row.id);
       if (!current) {
         missing.push(row.id);
@@ -791,5 +853,5 @@ ledgerRouter.post('/ledger/probe-https/apply', requirePermission('ledger.manage'
   });
   applyAll(updates);
 
-  res.json({ updated, missing });
+  res.json({ updated, missing, denied });
 });

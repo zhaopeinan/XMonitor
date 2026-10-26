@@ -12,6 +12,10 @@ export interface SystemRow {
   base_url: string;
   use_sso: number;
   auth_token: string | null;
+  /** 归属运维单位：数据权限「仅本运维单位」按它过滤监控系统 */
+  ops_unit: string;
+  /** 创建人用户 id（历史数据为空）；数据权限「仅本人创建」按它过滤 */
+  created_by: number | null;
   created_at: number;
 }
 
@@ -35,6 +39,8 @@ export interface SystemLedgerRow {
   location: string;
   remark: string;
   system_id: number | null;
+  /** 创建人用户 id（历史数据为空）；数据权限「仅本人创建」按它过滤 */
+  created_by: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -48,6 +54,8 @@ export interface UserRow {
   role: UserRole;
   /** 1=已停用，停用后不可登录、已有会话立即失效 */
   disabled: number;
+  /** 所属运维单位：数据权限「仅本运维单位」按它比对台账与监控系统 */
+  ops_unit: string;
   created_at: number;
 }
 

@@ -1,6 +1,7 @@
 import { db } from './db';
 import type { AlertRow, LlmAlertRow, LlmChannelRow, LlmModelRow, MonitorStatus, SystemRow } from './types';
 import { fetchProbeStats24h, vmEnabled } from './vm';
+import { systemScopeSql, type DataScopeCtx } from './scope';
 
 const STATUS_RANK: Record<MonitorStatus, number> = { up: 0, unknown: 1, slow: 2, down: 3 };
 
@@ -70,8 +71,16 @@ export interface DashboardLlmChannel {
   recent_alerts: (LlmAlertRow & { monitor_name: string })[];
 }
 
-export async function buildDashboard(): Promise<{ systems: DashboardSystem[]; llm_channels: DashboardLlmChannel[] }> {
-  const systems = db.prepare('SELECT * FROM systems ORDER BY id').all() as SystemRow[];
+/**
+ * 看板聚合数据。
+ * systems 部分按调用者的数据权限过滤（台账/系统/告警同源）；
+ * 大模型渠道不归属运维单位，保持全局可见。
+ */
+export async function buildDashboard(scope?: DataScopeCtx): Promise<{ systems: DashboardSystem[]; llm_channels: DashboardLlmChannel[] }> {
+  const filter = scope ? systemScopeSql(scope, 's') : { sql: '1=1', params: [] as unknown[] };
+  const systems = db
+    .prepare(`SELECT s.* FROM systems s WHERE ${filter.sql} ORDER BY s.id`)
+    .all(...filter.params) as SystemRow[];
   const dayAgo = Date.now() - 24 * 3600 * 1000;
 
   const [vmMonStats, vmLlmStats] = vmEnabled()

@@ -74,6 +74,7 @@ export const AUDIT_ACTION_LABELS: Record<string, string> = {
   password_change: '修改本人密码',
   'user.create': '新建账号',
   'user.role': '变更角色',
+  'user.ops_unit': '变更运维单位',
   'user.password_reset': '重置密码',
   'user.disable': '停用账号',
   'user.enable': '启用账号',

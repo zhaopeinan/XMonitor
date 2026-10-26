@@ -24,13 +24,27 @@ import {
 } from './captcha';
 import {
   ALL_PERMISSIONS,
+  DATA_SCOPE_DEFS,
   PERMISSION_DEFS,
   ROLE_LABELS,
+  getRoleDataScopes,
   getRolePermissions,
+  dataScopeForRole,
   permissionsForRole,
+  setRoleDataScopes,
   setRolePermissions,
+  type DataScope,
   type Permission,
 } from './permissions';
+import {
+  OUT_OF_SCOPE_ERROR,
+  alertInScope,
+  dataScopeOf,
+  idListSql,
+  ledgerInScope,
+  systemInScope,
+  systemScopeSql,
+} from './scope';
 import {
   SESSION_COOKIE,
   changeOwnPassword,
@@ -43,6 +57,7 @@ import {
   listSessions,
   listUsers,
   login,
+  normalizeOpsUnit,
   requireAdminRole,
   requireAuth,
   requirePermission,
@@ -53,9 +68,22 @@ import {
   updateUser,
 } from './users';
 import { AUDIT_ACTION_LABELS, listAuditLogs, recordAudit } from './audit';
-import type { SystemRow, UserRole } from './types';
+import type { SystemRow, UserRole, UserRow } from './types';
 
 export const apiRouter = Router();
+
+/**
+ * 登录与「取当前用户」返回同一份身份信息：
+ * 角色、功能权限（能做什么）、数据范围（能看哪些数据）。
+ * 数据范围每个请求现算，因此管理员改了配置立刻生效，不需要用户重新登录。
+ */
+function identityOf(user: Pick<UserRow, 'id' | 'username' | 'role' | 'ops_unit'>) {
+  return {
+    user: { id: user.id, username: user.username, role: user.role, ops_unit: user.ops_unit ?? '' },
+    permissions: permissionsForRole(user.role),
+    data_scope: dataScopeForRole(user.role),
+  };
+}
 
 /** 登录接口记录来源 IP 与客户端，供「在线会话」展示 */
 function userAgentOf(req: { headers: Record<string, unknown> }): string {
@@ -108,15 +136,14 @@ apiRouter.post('/auth/login', (req, res) => {
     actorName: user.username,
     action: 'login',
     target: user.username,
-    detail: `角色：${ROLE_LABELS[user.role] ?? user.role}`,
+    detail: `角色：${ROLE_LABELS[user.role] ?? user.role}${user.ops_unit ? ` · 运维单位：${user.ops_unit}` : ''}`,
     ip,
   });
   res.setHeader(
     'Set-Cookie',
     `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor((expiresAt - Date.now()) / 1000)}`,
   );
-  const permissions = permissionsForRole(user.role);
-  res.json({ user: { id: user.id, username: user.username, role: user.role }, permissions });
+  res.json(identityOf(user));
 });
 
 apiRouter.post('/auth/logout', (req, res) => {
@@ -139,11 +166,7 @@ apiRouter.post('/auth/logout', (req, res) => {
 });
 
 apiRouter.get('/auth/me', requireAuth, (req, res) => {
-  const u = req.user!;
-  res.json({
-    user: { id: u.id, username: u.username, role: u.role },
-    permissions: permissionsForRole(u.role),
-  });
+  res.json(identityOf(req.user!));
 });
 
 apiRouter.post('/auth/change-password', requireAuth, (req, res) => {
@@ -169,18 +192,32 @@ apiRouter.get('/users', requirePermission('users.manage'), (_req, res) => {
   res.json({ users: listUsers() });
 });
 
+/** 台账里出现过的运维单位：作为「所属运维单位」的候选，保证两边写法一致 */
+apiRouter.get('/users/ops-units', requirePermission('users.manage'), (_req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT TRIM(ops_unit) AS unit FROM system_ledgers WHERE TRIM(ops_unit) != ''
+       UNION
+       SELECT DISTINCT TRIM(ops_unit) AS unit FROM systems WHERE TRIM(ops_unit) != ''
+       ORDER BY unit`,
+    )
+    .all() as { unit: string }[];
+  res.json({ units: rows.map((r) => r.unit) });
+});
+
 apiRouter.post('/users', requirePermission('users.manage'), (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   const role = typeof req.body?.role === 'string' ? req.body.role : 'viewer';
-  const result = createUser(username, password, role, req.user!.role);
+  const opsUnit = normalizeOpsUnit(req.body?.ops_unit);
+  const result = createUser({ username, password, role, opsUnit }, req.user!.role);
   if (!result.ok) return res.status(400).json({ error: result.error });
   recordAudit({
     actorId: req.user!.id,
     actorName: req.user!.username,
     action: 'user.create',
     target: username,
-    detail: `角色：${ROLE_LABELS[role as UserRole] ?? role}`,
+    detail: `角色：${ROLE_LABELS[role as UserRole] ?? role}${opsUnit ? ` · 运维单位：${opsUnit}` : ''}`,
     ip: clientIp(req),
   });
   res.status(201).json({ users: listUsers() });
@@ -188,10 +225,11 @@ apiRouter.post('/users', requirePermission('users.manage'), (req, res) => {
 
 apiRouter.patch('/users/:id', requirePermission('users.manage'), (req, res) => {
   const id = Number(req.params.id);
-  const patch: { role?: string; password?: string; disabled?: boolean } = {};
+  const patch: { role?: string; password?: string; disabled?: boolean; opsUnit?: string } = {};
   if (typeof req.body?.role === 'string') patch.role = req.body.role;
   if (typeof req.body?.password === 'string' && req.body.password) patch.password = req.body.password;
   if (typeof req.body?.disabled === 'boolean') patch.disabled = req.body.disabled;
+  if (typeof req.body?.ops_unit === 'string') patch.opsUnit = req.body.ops_unit;
   const target = getUserBrief(id);
   const result = updateUser(id, patch, req.user!.id);
   if (!result.ok) return res.status(400).json({ error: result.error });
@@ -209,6 +247,16 @@ apiRouter.patch('/users/:id', requirePermission('users.manage'), (req, res) => {
       action: patch.disabled ? 'user.disable' : 'user.enable',
       target: name,
       detail: patch.disabled ? '已踢下线' : '',
+    });
+  }
+  if (patch.opsUnit !== undefined) {
+    const from = target?.ops_unit ?? '';
+    const to = normalizeOpsUnit(patch.opsUnit);
+    recordAudit({
+      ...actor,
+      action: 'user.ops_unit',
+      target: name,
+      detail: `${from || '（未设置）'} → ${to || '（不设置）'}`,
     });
   }
   res.json({ users: listUsers() });
@@ -284,12 +332,14 @@ apiRouter.get('/audit-logs', requirePermission('users.manage'), (req, res) => {
   res.json({ ...listAuditLogs({ limit, offset, q, action }), actions: AUDIT_ACTION_LABELS });
 });
 
-// ---- 角色权限配置 ----
+// ---- 角色权限配置：功能权限（能做什么）+ 数据权限（能看哪些数据） ----
 apiRouter.get('/roles/permissions', requirePermission('users.manage'), (_req, res) => {
   res.json({
     permissions: PERMISSION_DEFS,
+    data_scopes: DATA_SCOPE_DEFS,
     roles: ROLE_LABELS,
     role_permissions: getRolePermissions(),
+    role_data_scopes: getRoleDataScopes(),
   });
 });
 
@@ -301,20 +351,34 @@ apiRouter.put('/roles/permissions', requirePermission('users.manage'), (req, res
     if (!Array.isArray(list)) continue;
     patch[role] = list.filter((p: unknown): p is Permission => typeof p === 'string' && (ALL_PERMISSIONS as string[]).includes(p));
   }
+  // 数据权限与功能权限分开传：只传了其中一项时，另一项保持原样
+  const scopePatch: Partial<Record<UserRole, DataScope>> = {};
+  const rawScopes = (body.data_scopes ?? {}) as Record<string, unknown>;
+  for (const role of ['operator', 'viewer'] as UserRole[]) {
+    const value = rawScopes[role];
+    if (value === 'all' || value === 'unit' || value === 'self') scopePatch[role] = value;
+  }
   const before = getRolePermissions();
+  const beforeScopes = getRoleDataScopes();
   const role_permissions = setRolePermissions(patch);
+  const role_data_scopes = setRoleDataScopes(scopePatch);
   const labelOf = (key: string) => PERMISSION_DEFS.find((p) => p.key === key)?.label ?? key;
+  const scopeLabelOf = (key: string) => DATA_SCOPE_DEFS.find((d) => d.key === key)?.label ?? key;
   const diff: string[] = [];
   for (const role of ['operator', 'viewer'] as UserRole[]) {
-    if (!patch[role]) continue;
-    const prev = new Set(before[role] ?? []);
-    const next = new Set(role_permissions[role] ?? []);
-    const added = [...next].filter((k) => !prev.has(k)).map(labelOf);
-    const removed = [...prev].filter((k) => !next.has(k)).map(labelOf);
     const parts: string[] = [];
-    if (added.length) parts.push(`新增「${added.join('、')}」`);
-    if (removed.length) parts.push(`移除「${removed.join('、')}」`);
-    diff.push(`${ROLE_LABELS[role]}：${parts.length ? parts.join('，') : '无变化'}`);
+    if (patch[role]) {
+      const prev = new Set(before[role] ?? []);
+      const next = new Set(role_permissions[role] ?? []);
+      const added = [...next].filter((k) => !prev.has(k)).map(labelOf);
+      const removed = [...prev].filter((k) => !next.has(k)).map(labelOf);
+      if (added.length) parts.push(`功能权限新增「${added.join('、')}」`);
+      if (removed.length) parts.push(`功能权限移除「${removed.join('、')}」`);
+    }
+    if (scopePatch[role] && beforeScopes[role] !== role_data_scopes[role]) {
+      parts.push(`数据范围 ${scopeLabelOf(beforeScopes[role])} → ${scopeLabelOf(role_data_scopes[role])}`);
+    }
+    if (patch[role] || scopePatch[role]) diff.push(`${ROLE_LABELS[role]}：${parts.length ? parts.join('，') : '无变化'}`);
   }
   recordAudit({
     actorId: req.user!.id,
@@ -326,8 +390,10 @@ apiRouter.put('/roles/permissions', requirePermission('users.manage'), (req, res
   });
   res.json({
     permissions: PERMISSION_DEFS,
+    data_scopes: DATA_SCOPE_DEFS,
     roles: ROLE_LABELS,
     role_permissions,
+    role_data_scopes,
   });
 });
 
@@ -405,25 +471,36 @@ apiRouter.post('/systems', requirePermission('systems.manage'), (req, res) => {
     return res.status(400).json({ error: 'base_url 不是合法 URL' });
   }
   const useSso = req.body?.use_sso === false || req.body?.use_sso === 0 ? 0 : 1;
+  // 归属运维单位：默认取操作者自己的单位，避免新建后正是本单位的账号看不到
+  const opsUnit =
+    typeof req.body?.ops_unit === 'string' ? req.body.ops_unit.trim().slice(0, 120) : (req.user!.ops_unit ?? '').trim();
   const info = db
-    .prepare('INSERT INTO systems(name, base_url, use_sso, created_at) VALUES (?, ?, ?, ?)')
-    .run(name, baseUrl, useSso, Date.now());
+    .prepare('INSERT INTO systems(name, base_url, use_sso, ops_unit, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(name, baseUrl, useSso, opsUnit, req.user!.id, Date.now());
   res.status(201).json(serializeSystem(db.prepare('SELECT * FROM systems WHERE id = ?').get(info.lastInsertRowid)));
 });
 
-apiRouter.get('/systems', (_req, res) => {
-  res.json({ systems: (db.prepare('SELECT * FROM systems ORDER BY id').all() as unknown[]).map(serializeSystem) });
+apiRouter.get('/systems', (req, res) => {
+  const scope = systemScopeSql(dataScopeOf(req.user!), 's');
+  res.json({
+    systems: (
+      db.prepare(`SELECT s.* FROM systems s WHERE ${scope.sql} ORDER BY s.id`).all(...scope.params) as unknown[]
+    ).map(serializeSystem),
+  });
 });
 
 apiRouter.get('/systems/:id', (req, res) => {
-  const system = db.prepare('SELECT * FROM systems WHERE id = ?').get(Number(req.params.id));
+  const id = Number(req.params.id);
+  const system = db.prepare('SELECT * FROM systems WHERE id = ?').get(id);
   if (!system) return res.status(404).json({ error: '系统不存在' });
+  if (!systemInScope(dataScopeOf(req.user!), id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   res.json(serializeSystem(system));
 });
 
 apiRouter.get('/systems/:id/metrics', async (req, res) => {
   const id = Number(req.params.id);
   const range = parseMetricsRange(req.query.range);
+  if (!systemInScope(dataScopeOf(req.user!), id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   try {
     const payload = await buildSystemMetrics(id, range);
     if (!payload) return res.status(404).json({ error: '系统不存在' });
@@ -437,6 +514,7 @@ apiRouter.patch('/systems/:id', requirePermission('systems.manage'), (req, res) 
   const id = Number(req.params.id);
   const system = db.prepare('SELECT * FROM systems WHERE id = ?').get(id);
   if (!system) return res.status(404).json({ error: '系统不存在' });
+  if (!systemInScope(dataScopeOf(req.user!), id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   const b = req.body ?? {};
   const sets: string[] = [];
   const values: unknown[] = [];
@@ -457,6 +535,10 @@ apiRouter.patch('/systems/:id', requirePermission('systems.manage'), (req, res) 
     sets.push('use_sso = ?');
     values.push(b.use_sso ? 1 : 0);
   }
+  if (typeof b.ops_unit === 'string') {
+    sets.push('ops_unit = ?');
+    values.push(b.ops_unit.trim().slice(0, 120));
+  }
   // auth_token：空串清除；打码值（**** 开头）表示不修改
   if (typeof b.auth_token === 'string') {
     if (b.auth_token === '') {
@@ -473,6 +555,10 @@ apiRouter.patch('/systems/:id', requirePermission('systems.manage'), (req, res) 
 
 apiRouter.delete('/systems/:id', requirePermission('systems.manage'), (req, res) => {
   const id = Number(req.params.id);
+  if (!systemInScope(dataScopeOf(req.user!), id)) {
+    const exists = db.prepare('SELECT id FROM systems WHERE id = ?').get(id);
+    return exists ? res.status(403).json({ error: OUT_OF_SCOPE_ERROR }) : res.status(404).json({ error: '系统不存在' });
+  }
   const info = db.prepare('DELETE FROM systems WHERE id = ?').run(id);
   if (info.changes === 0) return res.status(404).json({ error: '系统不存在' });
   db.prepare('DELETE FROM candidates WHERE system_id = ?').run(id);
@@ -492,6 +578,7 @@ apiRouter.post('/systems/:id/renew-token', requirePermission('systems.manage'), 
   const systemId = Number(req.params.id);
   const system = db.prepare('SELECT * FROM systems WHERE id = ?').get(systemId);
   if (!system) return res.status(404).json({ error: '系统不存在' });
+  if (!systemInScope(dataScopeOf(req.user!), systemId)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   const steps: { phase: string; level: SsoLevel; message: string }[] = [];
   const emit = (phase: string, level: SsoLevel, message: string) => steps.push({ phase, level, message });
   try {
@@ -507,6 +594,7 @@ apiRouter.post('/systems/:id/analyze', requirePermission('analyze'), (req, res) 
   const systemId = Number(req.params.id);
   const system = db.prepare('SELECT id FROM systems WHERE id = ?').get(systemId) as SystemRow | undefined;
   if (!system) return res.status(404).json({ error: '系统不存在' });
+  if (!systemInScope(dataScopeOf(req.user!), systemId)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   const job = startAnalysis(systemId);
   res.status(202).json(job);
 });
@@ -515,6 +603,7 @@ apiRouter.get('/systems/:id/analysis', (req, res) => {
   const systemId = Number(req.params.id);
   const system = db.prepare('SELECT id FROM systems WHERE id = ?').get(systemId);
   if (!system) return res.status(404).json({ error: '系统不存在' });
+  if (!systemInScope(dataScopeOf(req.user!), systemId)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
   const { job, candidates } = getAnalysis(systemId);
   res.json({
     status: job?.status ?? 'idle',
@@ -528,18 +617,18 @@ apiRouter.get('/systems/:id/analysis', (req, res) => {
 });
 
 // ---- dashboard ----
-apiRouter.get('/dashboard', async (_req, res) => {
+apiRouter.get('/dashboard', async (req, res) => {
   try {
-    res.json(await buildDashboard());
+    res.json(await buildDashboard(dataScopeOf(req.user!)));
   } catch (e) {
     res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
   }
 });
 
 // ---- 监控大屏聚合数据 ----
-apiRouter.get('/screen', async (_req, res) => {
+apiRouter.get('/screen', async (req, res) => {
   try {
-    res.json(await buildScreen());
+    res.json(await buildScreen(dataScopeOf(req.user!)));
   } catch (e) {
     res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
   }
@@ -549,22 +638,26 @@ apiRouter.get('/screen', async (_req, res) => {
 apiRouter.get('/alerts', (req, res) => {
   const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
   const unackedOnly = req.query.acknowledged === '0';
+  const scope = systemScopeSql(dataScopeOf(req.user!), 's');
   const rows = db
     .prepare(
       `SELECT a.*, m.name AS monitor_name, m.system_id, s.name AS system_name
        FROM alerts a
        JOIN monitors m ON m.id = a.monitor_id
        JOIN systems s ON s.id = m.system_id
-       ${unackedOnly ? 'WHERE a.acknowledged = 0' : ''}
+       WHERE ${scope.sql}${unackedOnly ? ' AND a.acknowledged = 0' : ''}
        ORDER BY a.ts DESC LIMIT ?`,
     )
-    .all(limit);
+    .all(...scope.params, limit);
   res.json({ alerts: rows });
 });
 
 apiRouter.post('/alerts/:id/ack', requirePermission('alerts.ack'), (req, res) => {
-  const info = db.prepare('UPDATE alerts SET acknowledged = 1 WHERE id = ?').run(Number(req.params.id));
-  if (info.changes === 0) return res.status(404).json({ error: '告警不存在' });
+  const id = Number(req.params.id);
+  const exists = db.prepare('SELECT id FROM alerts WHERE id = ?').get(id);
+  if (!exists) return res.status(404).json({ error: '告警不存在' });
+  if (!alertInScope(dataScopeOf(req.user!), id)) return res.status(403).json({ error: OUT_OF_SCOPE_ERROR });
+  db.prepare('UPDATE alerts SET acknowledged = 1 WHERE id = ?').run(id);
   res.json({ ok: true });
 });
 
