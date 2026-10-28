@@ -36,10 +36,11 @@ services:
       PORT: "8790"
       XMONITOR_OBSCURA_ENDPOINT: "http://127.0.0.1:9222"
       XMONITOR_VM_URL: "http://victoriametrics:8428"
-      # 需要代理访问外网时，在同目录 .env 里设置（该文件不会入库）
+      # 仅 Node 出站（如 LLM）走代理；Chromium 在 entrypoint 里强制直连。
+      # 校内域名务必写进 NO_PROXY。代理在同目录 .env 配置（不入库）。
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,victoriametrics,xmonitor-vm}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,victoriametrics,xmonitor-vm,.bjtu.edu.cn,bjtu.edu.cn}
     volumes:
       - ./data:/app/data
       - ./vm-data:/app/vm-data:ro

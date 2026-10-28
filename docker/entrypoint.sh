@@ -12,12 +12,16 @@ fi
 
 if [ -n "$CHROME_BIN" ]; then
   echo "[entrypoint] 启动 Chromium CDP: $CHROME_BIN"
-  "$CHROME_BIN" \
+  # 页面探测必须直连（校内系统不走代理）。HTTP(S)_PROXY 只给 Node 拉外网 LLM 用，
+  # 若原样继承会导致 Chromium 报 ERR_PROXY_CONNECTION_FAILED。
+  env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy \
+    "$CHROME_BIN" \
     --headless=new \
     --no-sandbox \
     --disable-gpu \
     --disable-dev-shm-usage \
     --disable-software-rasterizer \
+    --no-proxy-server \
     --remote-debugging-address=127.0.0.1 \
     --remote-debugging-port=9222 \
     about:blank >/tmp/chromium-cdp.log 2>&1 &

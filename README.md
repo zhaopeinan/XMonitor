@@ -69,9 +69,9 @@ npm run dev
 Page checks need Chromium or Chrome listening for DevTools on port 9222. API checks and model probes do not. The Docker image starts that browser for you. Locally:
 
 ```bash
-# macOS
+# macOS (--no-proxy-server: campus sites go direct, ignore system Clash)
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --headless=new --disable-gpu \
+  --headless=new --disable-gpu --no-proxy-server \
   --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9222 \
   about:blank
@@ -79,7 +79,7 @@ Page checks need Chromium or Chrome listening for DevTools on port 9222. API che
 
 ```bash
 # Linux
-chromium --headless=new --disable-gpu \
+chromium --headless=new --disable-gpu --no-proxy-server \
   --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9222 \
   about:blank
@@ -114,7 +114,7 @@ Change it from the account menu before the port is reachable by anyone else. The
 | `PORT` | `8790` | API listen port |
 | `XMONITOR_OBSCURA_ENDPOINT` | `ws://127.0.0.1:9222/devtools/browser` | Chromium DevTools endpoint for page checks |
 | `XMONITOR_VM_URL` | unset | VictoriaMetrics base URL. Unset keeps series in SQLite |
-| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | unset | Outbound proxy for the app container |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | unset | Node outbound only (e.g. LLM); Chromium always goes direct. Put campus domains in `NO_PROXY` |
 
 Intervals, timeouts, the slow threshold, the webhook, and SSO credentials are edited in Settings after sign-in. Secret values are masked in API responses.
 

@@ -69,9 +69,9 @@ npm run dev
 页面探测需要本机有一个开着远程调试端口 9222 的 Chromium 或 Chrome。接口探测和模型探测不依赖它。Docker 镜像会自己启动浏览器。本机可以这样开：
 
 ```bash
-# macOS
+# macOS（--no-proxy-server：校内站点直连，不跟系统 Clash）
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --headless=new --disable-gpu \
+  --headless=new --disable-gpu --no-proxy-server \
   --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9222 \
   about:blank
@@ -79,7 +79,7 @@ npm run dev
 
 ```bash
 # Linux
-chromium --headless=new --disable-gpu \
+chromium --headless=new --disable-gpu --no-proxy-server \
   --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9222 \
   about:blank
@@ -114,7 +114,7 @@ npm start
 | `PORT` | `8790` | API 监听端口 |
 | `XMONITOR_OBSCURA_ENDPOINT` | `ws://127.0.0.1:9222/devtools/browser` | 页面探测用的 Chromium 调试端点 |
 | `XMONITOR_VM_URL` | 未设置 | VictoriaMetrics 地址。不设置则时序留在 SQLite |
-| `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` | 未设置 | 容器出站代理 |
+| `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` | 未设置 | 仅 Node 出站（如 LLM）；Chromium 强制直连。校内域名写入 `NO_PROXY` |
 
 探测间隔、超时、缓慢阈值、Webhook 和 SSO 账号在登录后的设置页修改。密钥在接口返回时打码。
 
