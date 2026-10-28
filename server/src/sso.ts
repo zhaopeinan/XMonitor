@@ -1,4 +1,5 @@
 import type { Browser, Page } from 'puppeteer-core';
+import { sm2 } from 'sm-crypto';
 import { db } from './db';
 import { lenientRequest, type LenientResponse } from './http';
 import { getActiveProfile, createLLMClient } from './llm';
@@ -9,11 +10,15 @@ export type SsoLevel = 'info' | 'success' | 'warn' | 'error';
 export type SsoEmit = (phase: string, level: SsoLevel, message: string, data?: unknown) => void;
 const noopEmit: SsoEmit = () => {};
 
-const LOGIN_URL_RE = /cas\.|\/auth\/login|\/sso|ids\.|authserver/i;
+// 旧 CAS(/auth/login) + 新统一身份认证(sso.bjtu.edu.cn/sso/login)
+const LOGIN_URL_RE = /cas\.|sso\.bjtu\.edu\.cn|\/auth\/login|\/sso(?:\/|$|\?)|ids\.|authserver/i;
 // 按优先级逐个尝试；不能用逗号合并选择器（querySelector 返回文档序第一个，logo 等含 "images" 的 src 会误命中）
 const CAPTCHA_IMG_SELECTORS = ['img.captcha', 'img[src*="captcha" i]', 'img[src*="verify" i]', 'img[src*="image" i]'];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const SSO_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
+const RENEW_UA = SSO_UA;
 
 async function findCaptchaImg(page: Page) {
   for (const sel of CAPTCHA_IMG_SELECTORS) {
@@ -170,7 +175,8 @@ async function fillLoginForm(page: Page, username: string, password: string, cap
       el.dispatchEvent(new Event('change', { bubbles: true }));
     };
     const pw = document.querySelector('input[type=password]');
-    let un = document.querySelector('#id_loginname')
+    let un = document.querySelector('input[name="username"]')
+      || document.querySelector('#id_loginname')
       || document.querySelector('input[name*="user" i]')
       || document.querySelector('input[name*="loginname" i]');
     if (!un && pw) {
@@ -307,6 +313,305 @@ interface HttpFormSnapshot {
   captchaImg: string | null;
 }
 
+/** 新版统一身份认证（sso.bjtu.edu.cn）登录页解析结果 */
+interface ModernSsoPage {
+  flowId: string;
+  pageName: string;
+  sm2Enabled: boolean;
+  sm2PublicKey: string | null;
+  delegatorList: string[] | null;
+  loginUserName: string;
+  errorMsg: string;
+  captchaType: string | null;
+  actionPath: string;
+}
+
+function parseModernSsoHtml(html: string): ModernSsoPage | null {
+  if (!/name="flowId"|loginType|sm2\.encrypt|ssoConfig/i.test(html)) return null;
+  const flowId = html.match(/name="flowId"\s+value="([^"]*)"/i)?.[1] ?? '';
+  const pageName = html.match(/var\s+pageName\s*=\s*"([^"]*)"/)?.[1] ?? 'login';
+  const pub = html.match(/"publicKey"\s*:\s*"([^"]+)"/)?.[1]?.replace(/\\\//g, '/') ?? null;
+  const sm2Enabled = /"sm2"\s*:\s*\{[^}]*"enabled"\s*:\s*true/i.test(html) || !!pub;
+  let delegatorList: string[] | null = null;
+  const dl = html.match(/var\s+delegatorList\s*=\s*(\[[\s\S]*?\]|null)\s*;/);
+  if (dl?.[1] && dl[1] !== 'null') {
+    try {
+      delegatorList = JSON.parse(dl[1]) as string[];
+    } catch {
+      delegatorList = null;
+    }
+  }
+  const loginUserName = html.match(/var\s+loginUserName\s*=\s*"([^"]*)"/)?.[1] ?? '';
+  const errRaw = html.match(/var\s+error\s*=\s*(null|\{[\s\S]*?\})\s*;/)?.[1] ?? 'null';
+  let errorMsg = '';
+  let captchaType: string | null = null;
+  if (errRaw !== 'null') {
+    try {
+      const err = JSON.parse(errRaw) as { msg?: string; data?: { captchaType?: string } | null };
+      errorMsg = err.msg ?? '';
+      captchaType = err.data?.captchaType ?? null;
+    } catch {
+      errorMsg = errRaw.slice(0, 120);
+    }
+  }
+  const actionPath = html.match(/<form[^>]*\baction="([^"]*)"/i)?.[1] ?? '/sso/login';
+  return {
+    flowId,
+    pageName,
+    sm2Enabled,
+    sm2PublicKey: pub,
+    delegatorList,
+    loginUserName,
+    errorMsg,
+    captchaType,
+    actionPath,
+  };
+}
+
+function isModernSsoHtml(html: string): boolean {
+  return !!parseModernSsoHtml(html)?.flowId || /name="loginType"[\s\S]*username_password/i.test(html);
+}
+
+/** 与浏览器 sm2.min.js 包装一致：公钥 base64 → hex，密文 hex → base64，cipherMode=1 (C1C3C2) */
+function encryptSm2Password(password: string, publicKeyB64: string): string {
+  const pubHex = Buffer.from(publicKeyB64, 'base64').toString('hex');
+  const cipherHex = sm2.doEncrypt(password, pubHex, 1);
+  return Buffer.from(cipherHex, 'hex').toString('base64');
+}
+
+async function fetchPenggleCaptcha(
+  origin: string,
+  jar: DomainCookies,
+): Promise<{ captchaId: string; imgB64: string } | null> {
+  const url = `${origin}/api/captcha/getCaptcha?rnd=${Math.random()}`;
+  try {
+    const res = await httpFetch(url, { method: 'POST', headers: { Accept: 'application/json' } }, jar);
+    const json = JSON.parse(await res.text()) as {
+      code?: number;
+      data?: { captchaId?: string; captchaImg?: string };
+    };
+    const id = json.data?.captchaId;
+    let img = json.data?.captchaImg;
+    if (!id || !img) return null;
+    if (img.startsWith('data:image/')) img = img.slice(img.indexOf('base64,') + 7);
+    return { captchaId: id, imgB64: img };
+  } catch {
+    return null;
+  }
+}
+
+function buildModernLoginBody(
+  page: ModernSsoPage,
+  fields: {
+    username?: string;
+    password?: string;
+    loginType?: string;
+    captcha?: string;
+    delegator?: string;
+    pageFrom?: string;
+  },
+): string {
+  return new URLSearchParams({
+    username: fields.username ?? '',
+    password: fields.password ?? '',
+    loginType: fields.loginType ?? 'username_password',
+    flowId: page.flowId,
+    client_id: '',
+    redirect_uri: '',
+    response_type: '',
+    scope: '',
+    state: '',
+    captcha: fields.captcha ?? '',
+    delegator: fields.delegator ?? '',
+    tokenCode: '',
+    continue: '',
+    asserts: '',
+    pageFrom: fields.pageFrom ?? '',
+    submit: '登录',
+  }).toString();
+}
+
+/**
+ * 新版统一身份认证 HTTP 登录：
+ * GET 登录页 → SM2 加密密码 POST →（可选）身份选择 → 302 回业务系统。
+ * 失败后若要求图片验证码，则拉 penggle 验证码 + LLM 识别后重试。
+ */
+async function modernSsoLoginHttp(
+  loginUrl: string,
+  jar: DomainCookies,
+  username: string,
+  password: string,
+  emit: SsoEmit,
+  maxAttempts = 3,
+): Promise<{ ok: boolean; reason: string }> {
+  const origin = new URL(loginUrl).origin;
+  let lastReason = '';
+  let needCaptcha = false;
+  let captchaType: string | null = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let page: ModernSsoPage | null = null;
+    let postUrl = loginUrl;
+    try {
+      const res = await httpFetch(loginUrl, { headers: { 'User-Agent': RENEW_UA, Referer: origin + '/' } }, jar);
+      // 已有 SSO 会话时，访问登录页会直接 302 回业务系统
+      if (res.status >= 300 && res.status < 400) {
+        await res.arrayBuffer().catch(() => {});
+        emit('sso', 'success', '统一身份认证登录成功（已有会话）', { attempt });
+        return { ok: true, reason: '' };
+      }
+      const html = await res.text();
+      page = parseModernSsoHtml(html);
+      if (page) postUrl = new URL(page.actionPath || '/sso/login', loginUrl).toString();
+      // 保留查询串（service / pageName），与浏览器提交一致
+      if (!postUrl.includes('?') && loginUrl.includes('?')) {
+        postUrl = postUrl + loginUrl.slice(loginUrl.indexOf('?'));
+      }
+    } catch (e) {
+      lastReason = `获取登录页失败: ${e instanceof Error ? e.message : String(e)}`;
+      emit('sso', 'warn', lastReason, { attempt });
+      continue;
+    }
+    if (!page?.flowId) {
+      lastReason = '登录页解析失败（非新版统一身份认证表单）';
+      emit('sso', 'warn', lastReason, { attempt });
+      return { ok: false, reason: lastReason };
+    }
+    if (!page.sm2PublicKey && page.sm2Enabled) {
+      lastReason = '登录页未下发 SM2 公钥';
+      emit('sso', 'error', lastReason);
+      return { ok: false, reason: lastReason };
+    }
+
+    let captchaField = '';
+    if (needCaptcha || (captchaType && /penggle|image/i.test(captchaType))) {
+      const cap = await fetchPenggleCaptcha(origin, jar);
+      if (!cap) {
+        lastReason = '获取验证码失败';
+        emit('sso', 'warn', lastReason, { attempt });
+        continue;
+      }
+      try {
+        const answer = await solveCaptcha(cap.imgB64);
+        emit('sso', 'info', `识别验证码: ${answer}`, { attempt, answer });
+        captchaField = JSON.stringify({ captchaId: cap.captchaId, captchaValue: answer });
+      } catch (e) {
+        lastReason = `验证码识别失败: ${e instanceof Error ? e.message : String(e)}`;
+        emit('sso', 'warn', `${lastReason}，重试`, { attempt });
+        continue;
+      }
+    }
+
+    let encPassword = password;
+    if (page.sm2PublicKey) {
+      try {
+        encPassword = encryptSm2Password(password, page.sm2PublicKey);
+      } catch (e) {
+        lastReason = `SM2 加密失败: ${e instanceof Error ? e.message : String(e)}`;
+        emit('sso', 'error', lastReason);
+        return { ok: false, reason: lastReason };
+      }
+    }
+
+    emit('sso', 'info', '登录提交', { attempt });
+    try {
+      const res = await httpFetch(
+        postUrl,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': RENEW_UA,
+            Referer: loginUrl,
+            Origin: origin,
+          },
+          body: buildModernLoginBody(page, {
+            username,
+            password: encPassword,
+            loginType: 'username_password',
+            captcha: captchaField,
+            pageFrom: 'login',
+          }),
+        },
+        jar,
+      );
+
+      // 直接 302 回业务系统
+      if (res.status >= 300 && res.status < 400) {
+        await res.arrayBuffer().catch(() => {});
+        emit('sso', 'success', '统一身份认证登录成功', { attempt });
+        return { ok: true, reason: '' };
+      }
+
+      const html = await res.text();
+      const next = parseModernSsoHtml(html);
+
+      // 多身份选择
+      if (next?.pageName === 'select' && next.delegatorList?.length) {
+        const delegator = next.delegatorList.includes(username)
+          ? username
+          : (next.loginUserName && next.delegatorList.includes(next.loginUserName)
+              ? next.loginUserName
+              : next.delegatorList[0]);
+        emit('sso', 'info', `选择登录身份: ${delegator}`, { attempt, delegatorList: next.delegatorList });
+        const selRes = await httpFetch(
+          postUrl,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'User-Agent': RENEW_UA,
+              Referer: loginUrl,
+              Origin: origin,
+            },
+            body: buildModernLoginBody(next, {
+              username: next.loginUserName || username,
+              loginType: 'username_password',
+              delegator,
+              pageFrom: 'select',
+            }),
+          },
+          jar,
+        );
+        if (selRes.status >= 300 && selRes.status < 400) {
+          await selRes.arrayBuffer().catch(() => {});
+          emit('sso', 'success', '统一身份认证登录成功', { attempt });
+          return { ok: true, reason: '' };
+        }
+        const selHtml = await selRes.text();
+        const selPage = parseModernSsoHtml(selHtml);
+        lastReason = selPage?.errorMsg || `身份选择后仍停留在 ${selPage?.pageName || '未知'} 页`;
+        if (selPage?.pageName === 'mfa') {
+          lastReason = '需要双因子认证（短信/TOTP/网证），当前自动化不支持';
+          emit('sso', 'error', lastReason);
+          return { ok: false, reason: lastReason };
+        }
+        emit('sso', 'warn', `登录未完成（${lastReason}），重试`, { attempt });
+        continue;
+      }
+
+      if (next?.pageName === 'mfa') {
+        lastReason = '需要双因子认证（短信/TOTP/网证），当前自动化不支持';
+        emit('sso', 'error', lastReason);
+        return { ok: false, reason: lastReason };
+      }
+
+      lastReason = next?.errorMsg || `服务器返回 ${res.status}，仍在登录页`;
+      if (next?.captchaType) {
+        needCaptcha = true;
+        captchaType = next.captchaType;
+      } else if (/验证码|captcha/i.test(lastReason)) {
+        needCaptcha = true;
+      }
+      emit('sso', 'warn', `登录被拒（${lastReason}），重试`, { attempt });
+    } catch (e) {
+      lastReason = `登录请求失败: ${e instanceof Error ? e.message : String(e)}`;
+      emit('sso', 'warn', `${lastReason}，重试`, { attempt });
+    }
+  }
+  return { ok: false, reason: lastReason || '登录失败' };
+}
+
 function parseLoginHtml(html: string, pageUrl: string): HttpFormSnapshot | null {
   // 页面可能有多个表单（语言切换、搜索等），优先取包含密码/验证码字段的登录表单
   const forms = html.match(/<form[^>]*>/gi) ?? [];
@@ -386,23 +691,89 @@ async function injectCookies(page: Page, jar: DomainCookies): Promise<void> {
   }
 }
 
-async function performSsoLoginHttp(page: Page, opts: SsoLoginOptions, emit: SsoEmit): Promise<SsoLoginResult> {
+/** 以当前页面 cookie 为种子建 jar，供 Node 层 HTTP 登录后回注浏览器 */
+async function jarFromPage(page: Page, origin: string): Promise<DomainCookies> {
+  const jar = new DomainCookies();
+  try {
+    const client = await page.createCDPSession();
+    const ck = (await client.send('Network.getCookies', { urls: [origin] })) as {
+      cookies?: { name: string; value: string }[];
+    };
+    jar.mergePairs(
+      origin,
+      (ck.cookies ?? []).map((c) => [c.name, c.value]),
+    );
+  } catch {
+    // 空 jar 起步
+  }
+  return jar;
+}
+
+/** 登录成功后跟随重定向链，把沿途 cookie 回注浏览器 */
+async function followRedirectsAndInject(
+  page: Page,
+  jar: DomainCookies,
+  startUrl: string,
+  location: string | null,
+  emit: SsoEmit,
+): Promise<void> {
+  let current = location ?? '';
+  let hops = 0;
+  while (current && hops < 8) {
+    hops++;
+    const next = new URL(current, startUrl).toString();
+    emit('sso', 'info', `跟随重定向链 (${hops})`, { url: next });
+    try {
+      const hop = await httpFetch(next, { headers: { 'User-Agent': SSO_UA, Referer: startUrl } }, jar);
+      if (hop.status >= 300 && hop.status < 400 && hop.headers.get('location')) {
+        current = hop.headers.get('location')!;
+        await hop.arrayBuffer().catch(() => {});
+      } else {
+        await hop.arrayBuffer().catch(() => {});
+        break;
+      }
+    } catch {
+      break;
+    }
+  }
+  await injectCookies(page, jar).catch(() => {});
+}
+
+async function performModernSsoLoginHttp(page: Page, opts: SsoLoginOptions, emit: SsoEmit): Promise<SsoLoginResult> {
+  const loginUrl = page.url();
+  const origin = new URL(loginUrl).origin;
+  const jar = await jarFromPage(page, origin);
+  const result = await modernSsoLoginHttp(loginUrl, jar, opts.username, opts.password, emit, opts.maxAttempts ?? 3);
+  if (!result.ok) {
+    const msg = `SSO 登录失败: ${result.reason}`;
+    emit('sso', 'error', msg, { reason: result.reason });
+    return { ok: false, message: msg, final_url: page.url() };
+  }
+  // 再走一遍 authorize/业务回调链，收集业务域 cookie
+  try {
+    const probe = await httpFetch(loginUrl, { headers: { 'User-Agent': SSO_UA } }, jar);
+    const loc = probe.headers.get('location');
+    if (probe.status >= 300 && probe.status < 400 && loc) {
+      await followRedirectsAndInject(page, jar, loginUrl, loc, emit);
+    } else {
+      await probe.arrayBuffer().catch(() => {});
+      await injectCookies(page, jar).catch(() => {});
+    }
+  } catch {
+    await injectCookies(page, jar).catch(() => {});
+  }
+  emit('sso', 'success', 'SSO 登录成功', { final_url: page.url() });
+  return { ok: true, message: 'SSO 登录成功', final_url: page.url() };
+}
+
+async function performDjangoSsoLoginHttp(page: Page, opts: SsoLoginOptions, emit: SsoEmit): Promise<SsoLoginResult> {
   const maxAttempts = opts.maxAttempts ?? 3;
   const loginUrl = page.url();
   const origin = new URL(loginUrl).origin;
-  const jar = new DomainCookies();
-  // 以 obscura 页面现有 cookie 为种子（csrftoken 与会话的一致性）
-  try {
-    const client = await page.createCDPSession();
-    const ck = (await client.send('Network.getCookies', { urls: [origin] })) as { cookies?: { name: string; value: string }[] };
-    jar.mergePairs(origin, (ck.cookies ?? []).map((c) => [c.name, c.value]));
-  } catch {
-    // 取不到就从空 jar 开始，GET 登录页时会拿到 csrftoken
-  }
+  const jar = await jarFromPage(page, origin);
 
   let lastReason = '';
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    // 每次 attempt 重新 GET 登录页，保证 captcha_0 / csrf 新鲜且同 cookie 会话
     let snap: HttpFormSnapshot | null = null;
     try {
       const res = await httpFetch(loginUrl, { headers: { Referer: origin + '/' } }, jar);
@@ -441,28 +812,8 @@ async function performSsoLoginHttp(page: Page, opts: SsoLoginOptions, emit: SsoE
         jar,
       );
       if (res.status >= 300 && res.status < 400) {
-        // 跟随 OAuth 重定向链（authorize → 系统 callback → ...），收集沿途各域的会话 cookie
-        let current = res.headers.get('location') ?? '';
-        let hops = 0;
-        while (current && hops < 6) {
-          hops++;
-          const next = new URL(current, snap.action).toString();
-          emit('sso', 'info', `跟随重定向链 (${hops})`, { url: next });
-          try {
-            const hop = await httpFetch(next, { headers: { Referer: loginUrl } }, jar);
-            if (hop.status >= 300 && hop.status < 400 && hop.headers.get('location')) {
-              current = hop.headers.get('location')!;
-              await hop.arrayBuffer().catch(() => {});
-            } else {
-              await hop.arrayBuffer().catch(() => {});
-              break;
-            }
-          } catch {
-            break;
-          }
-        }
-        await injectCookies(page, jar).catch(() => {});
-        emit('sso', 'success', 'SSO 登录成功', { final_url: current || origin, hops });
+        await followRedirectsAndInject(page, jar, snap.action, res.headers.get('location'), emit);
+        emit('sso', 'success', 'SSO 登录成功', { final_url: page.url() });
         return { ok: true, message: 'SSO 登录成功', final_url: page.url() };
       }
       const html = await res.text();
@@ -479,19 +830,33 @@ async function performSsoLoginHttp(page: Page, opts: SsoLoginOptions, emit: SsoE
   return { ok: false, message: msg, final_url: page.url() };
 }
 
-/** 判断是否为 django-simple-captcha 表单（含 captcha_0 隐藏字段） */
-async function isDjangoCaptchaForm(page: Page): Promise<boolean> {
-  return !!(await Promise.race([
-    page.evaluate(`!!document.querySelector('input[name="captcha_0"]')`).catch(() => false),
-    sleep(3000).then(() => false),
-  ]));
+async function detectLoginFormKind(page: Page): Promise<'modern' | 'django' | 'generic'> {
+  const kind = await Promise.race([
+    page
+      .evaluate(`(() => {
+        if (document.querySelector('input[name="flowId"]') && document.querySelector('input[name="loginType"]')) return 'modern';
+        if (document.querySelector('input[name="captcha_0"]')) return 'django';
+        const html = document.documentElement ? document.documentElement.innerHTML : '';
+        if (/ssoConfig|"publicKey"|sm2\\.encrypt/i.test(html)) return 'modern';
+        return 'generic';
+      })()`)
+      .catch(() => 'generic'),
+    sleep(3000).then(() => 'generic' as const),
+  ]);
+  return kind === 'modern' || kind === 'django' ? kind : 'generic';
 }
 
 export async function performSsoLogin(page: Page, opts: SsoLoginOptions): Promise<SsoLoginResult> {
   const emit = opts.emit ?? noopEmit;
-  if (await isDjangoCaptchaForm(page)) {
-    return performSsoLoginHttp(page, opts, emit);
+  const kind = await detectLoginFormKind(page);
+  if (kind === 'modern') return performModernSsoLoginHttp(page, opts, emit);
+  if (kind === 'django') return performDjangoSsoLoginHttp(page, opts, emit);
+
+  // URL 已是新版 SSO，但兼容壳尚未渲染出字段时，仍走 HTTP 新链路
+  if (/sso\.bjtu\.edu\.cn|\/sso\/login/i.test(page.url())) {
+    return performModernSsoLoginHttp(page, opts, emit);
   }
+
   // 其他登录表单：合成事件提交路径
   const maxAttempts = opts.maxAttempts ?? 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -571,13 +936,11 @@ export async function ensureSession(
   return { page, loggedIn: !stillLogin };
 }
 
-// ---------- Token 自动续期（若依 OAuth2 + CAS 验证码登录，纯 Node 链路） ----------
-// 链路：{prefix}/oauthLogin → 302 CAS authorize →（匿名先探出登录页 URL）→
-// django-captcha 登录拿 session → authorize 出 code → oauthCallBack 一次性消费 code →
-// 302 响应的 Set-Cookie: Admin-Token 即 token。code 只能消费一次，每跳严格请求一次。
-
-const RENEW_UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
+// ---------- Token 自动续期（若依 OAuth2 + 统一身份认证，纯 Node 链路） ----------
+// 链路：{prefix}/oauthLogin → 302 authorize →（匿名先探出登录页 URL）→
+// 新版 SM2 SSO（或旧版 django-captcha）登录拿 session → authorize 出 code →
+// oauthCallBack 一次性消费 code → 302 响应的 Set-Cookie: Admin-Token 即 token。
+// code 只能消费一次，每跳严格请求一次。
 
 export interface TokenRenewResult {
   ok: boolean;
@@ -639,23 +1002,28 @@ async function discoverOauthEntry(
   return null;
 }
 
-/** 匿名访问 authorize，跟随到 CAS 登录页，拿到登录页 URL（含 next 参数） */
+/** 匿名访问 authorize，跟随到 CAS/新版 SSO 登录页，拿到登录页 URL */
 async function discoverCasLoginUrl(authorizeUrl: string, jar: DomainCookies): Promise<string | null> {
-  // 登录页特征：/auth/login、authserver、ids. 等；authorize 本身也含 cas. 域名，不能用它判定
-  const LOGIN_PAGE_RE = /\/auth\/login|authserver|ids\.|\/sso\/login/i;
+  // 登录页特征；authorize 本身也含 cas. 域名，不能单靠域名判定
+  const LOGIN_PAGE_RE = /\/auth\/login|authserver|ids\.|\/sso\/login|sso\.bjtu\.edu\.cn/i;
   let cur: string | null = authorizeUrl;
-  for (let hop = 0; hop < 6 && cur; hop++) {
+  for (let hop = 0; hop < 8 && cur; hop++) {
     const res = await httpFetch(cur, { headers: { 'User-Agent': RENEW_UA } }, jar);
     const loc = res.headers.get('location');
-    await res.arrayBuffer().catch(() => {});
-    if (!(res.status >= 300 && res.status < 400 && loc)) break;
-    cur = new URL(loc, cur).toString();
-    if (LOGIN_PAGE_RE.test(cur)) return cur;
+    if (res.status >= 300 && res.status < 400 && loc) {
+      await res.arrayBuffer().catch(() => {});
+      cur = new URL(loc, cur).toString();
+      if (LOGIN_PAGE_RE.test(cur)) return cur;
+      continue;
+    }
+    const html = await res.text().catch(() => '');
+    if (html && (isModernSsoHtml(html) || /captcha_0/i.test(html) || LOGIN_PAGE_RE.test(cur))) return cur;
+    break;
   }
-  return null;
+  return LOGIN_PAGE_RE.test(authorizeUrl) ? authorizeUrl : null;
 }
 
-/** CAS 验证码登录（最多 maxAttempts 次），成功后会话写入 jar */
+/** 统一身份认证登录（新版 SM2 / 旧版 django-captcha），成功后会话写入 jar */
 async function casLoginHttp(
   loginUrl: string,
   jar: DomainCookies,
@@ -664,6 +1032,21 @@ async function casLoginHttp(
   emit: SsoEmit,
   maxAttempts = 3,
 ): Promise<{ ok: boolean; reason: string }> {
+  let html = '';
+  try {
+    const res = await httpFetch(loginUrl, { headers: { 'User-Agent': RENEW_UA } }, jar);
+    html = await res.text();
+  } catch (e) {
+    return { ok: false, reason: `获取登录页失败: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  if (isModernSsoHtml(html)) {
+    const bridged: SsoEmit = (phase, level, message, data) =>
+      emit(phase === 'sso' ? 'renew' : phase, level, message, data);
+    return modernSsoLoginHttp(loginUrl, jar, username, password, bridged, maxAttempts);
+  }
+
+  // 旧版 django-simple-captcha 兜底
   let lastReason = '';
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let snap: HttpFormSnapshot | null = null;
@@ -676,7 +1059,7 @@ async function casLoginHttp(
       continue;
     }
     if (!snap || !snap.captcha0 || !snap.captchaImg) {
-      lastReason = '登录页表单解析失败（非 django-captcha 结构）';
+      lastReason = '登录页表单解析失败（非 django-captcha / 新版 SSO 结构）';
       emit('renew', 'warn', lastReason, { attempt });
       break;
     }

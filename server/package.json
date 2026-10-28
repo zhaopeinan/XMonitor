@@ -13,6 +13,7 @@
     "express": "^4.21.2",
     "openai": "^4.90.0",
     "puppeteer-core": "^24.6.0",
+    "sm-crypto": "^0.5.8",
     "ws": "^8.18.2"
   },
   "devDependencies": {
