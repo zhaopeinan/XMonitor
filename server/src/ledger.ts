@@ -90,6 +90,19 @@ function normalizeBool(raw: unknown): boolean {
   return raw === true || raw === 1 || raw === '1' || raw === 'true';
 }
 
+const OPS_TYPES = new Set(['', 'long_term', 'phased']);
+
+/** 正整数容量字段（CPU 核数 / 内存 GB / 硬盘 GB）；空串与 null 表示未填 */
+function normalizePositiveInt(raw: unknown, label: string): Validated<number | null> {
+  if (raw === undefined || raw === null || raw === '') return { ok: true, value: null };
+  const n = typeof raw === 'number' ? raw : Number(String(raw).trim());
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    return { ok: false, error: `${label}须为正整数` };
+  }
+  if (n > 1_000_000) return { ok: false, error: `${label}过大` };
+  return { ok: true, value: n };
+}
+
 interface EntryInput {
   name: string;
   ops_unit: string;
@@ -98,6 +111,14 @@ interface EntryInput {
   domain_applied: number;
   domain: string;
   location: string;
+  os_name: string;
+  os_version: string;
+  cpu_cores: number | null;
+  memory_gb: number | null;
+  disk_gb: number | null;
+  sso_integrated: number;
+  ops_type: string;
+  backup_info: string;
   remark: string;
   system_id: number | null;
 }
@@ -149,6 +170,36 @@ function readEntryInput(body: unknown, existing?: SystemLedgerRow): Validated<En
     }
   }
 
+  const osName = b.os_name === undefined && existing ? existing.os_name : normalizeText(b.os_name, 80);
+  const osVersion = b.os_version === undefined && existing ? existing.os_version : normalizeText(b.os_version, 80);
+
+  const cpuResult = normalizePositiveInt(
+    b.cpu_cores === undefined && existing ? existing.cpu_cores : b.cpu_cores,
+    'CPU 核心数',
+  );
+  if (!cpuResult.ok) return cpuResult;
+  const memResult = normalizePositiveInt(
+    b.memory_gb === undefined && existing ? existing.memory_gb : b.memory_gb,
+    '内存',
+  );
+  if (!memResult.ok) return memResult;
+  const diskResult = normalizePositiveInt(
+    b.disk_gb === undefined && existing ? existing.disk_gb : b.disk_gb,
+    '硬盘',
+  );
+  if (!diskResult.ok) return diskResult;
+
+  const ssoIntegrated = b.sso_integrated === undefined && existing
+    ? existing.sso_integrated
+    : normalizeBool(b.sso_integrated)
+      ? 1
+      : 0;
+
+  const opsTypeRaw = b.ops_type === undefined && existing ? existing.ops_type : normalizeText(b.ops_type, 40);
+  if (!OPS_TYPES.has(opsTypeRaw)) {
+    return { ok: false, error: '运维类型只能是「长期运维」或「阶段性运维」' };
+  }
+
   return {
     ok: true,
     value: {
@@ -159,6 +210,14 @@ function readEntryInput(body: unknown, existing?: SystemLedgerRow): Validated<En
       domain_applied: domainApplied,
       domain: domainResult.value,
       location: b.location === undefined && existing ? existing.location : normalizeText(b.location, 200),
+      os_name: osName,
+      os_version: osVersion,
+      cpu_cores: cpuResult.value,
+      memory_gb: memResult.value,
+      disk_gb: diskResult.value,
+      sso_integrated: ssoIntegrated,
+      ops_type: opsTypeRaw,
+      backup_info: b.backup_info === undefined && existing ? existing.backup_info : normalizeText(b.backup_info, 2000),
       remark: b.remark === undefined && existing ? existing.remark : normalizeText(b.remark, 2000),
       system_id: systemId,
     },
@@ -203,8 +262,11 @@ ledgerRouter.post('/ledger', requirePermission('ledger.manage'), (req, res) => {
   const v = input.value;
   const info = db
     .prepare(
-      `INSERT INTO system_ledgers(name, ops_unit, ip, external_access, domain_applied, domain, location, remark, system_id, created_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO system_ledgers(
+         name, ops_unit, ip, external_access, domain_applied, domain, location,
+         os_name, os_version, cpu_cores, memory_gb, disk_gb, sso_integrated, ops_type, backup_info,
+         remark, system_id, created_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       v.name,
@@ -214,6 +276,14 @@ ledgerRouter.post('/ledger', requirePermission('ledger.manage'), (req, res) => {
       v.domain_applied,
       v.domain,
       v.location,
+      v.os_name,
+      v.os_version,
+      v.cpu_cores,
+      v.memory_gb,
+      v.disk_gb,
+      v.sso_integrated,
+      v.ops_type,
+      v.backup_info,
       v.remark,
       v.system_id,
       req.user!.id,
@@ -233,7 +303,10 @@ ledgerRouter.patch('/ledger/:id', requirePermission('ledger.manage'), (req, res)
   const v = input.value;
   db.prepare(
     `UPDATE system_ledgers
-     SET name = ?, ops_unit = ?, ip = ?, external_access = ?, domain_applied = ?, domain = ?, location = ?, remark = ?, system_id = ?, updated_at = ?
+     SET name = ?, ops_unit = ?, ip = ?, external_access = ?, domain_applied = ?, domain = ?, location = ?,
+         os_name = ?, os_version = ?, cpu_cores = ?, memory_gb = ?, disk_gb = ?,
+         sso_integrated = ?, ops_type = ?, backup_info = ?,
+         remark = ?, system_id = ?, updated_at = ?
      WHERE id = ?`,
   ).run(
     v.name,
@@ -243,6 +316,14 @@ ledgerRouter.patch('/ledger/:id', requirePermission('ledger.manage'), (req, res)
     v.domain_applied,
     v.domain,
     v.location,
+    v.os_name,
+    v.os_version,
+    v.cpu_cores,
+    v.memory_gb,
+    v.disk_gb,
+    v.sso_integrated,
+    v.ops_type,
+    v.backup_info,
     v.remark,
     v.system_id,
     Date.now(),

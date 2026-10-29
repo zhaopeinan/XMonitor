@@ -59,6 +59,22 @@ export interface LedgerEntry {
   domain_applied: boolean | number;
   domain: string;
   location: string;
+  /** 操作系统发行版/产品名 */
+  os_name: string;
+  /** 操作系统版本号 */
+  os_version: string;
+  /** CPU 核心数；未填为空 */
+  cpu_cores: number | null;
+  /** 内存（GB）；未填为空 */
+  memory_gb: number | null;
+  /** 硬盘（GB）；未填为空 */
+  disk_gb: number | null;
+  /** 是否对接统一身份认证 */
+  sso_integrated: boolean | number;
+  /** 运维类型：long_term / phased / 空 */
+  ops_type: string;
+  /** 备份情况 */
+  backup_info: string;
   remark: string;
   system_id: number | null;
   system_name: string | null;
@@ -75,6 +91,14 @@ export interface LedgerEntryInput {
   domain_applied?: boolean;
   domain?: string;
   location?: string;
+  os_name?: string;
+  os_version?: string;
+  cpu_cores?: number | null;
+  memory_gb?: number | null;
+  disk_gb?: number | null;
+  sso_integrated?: boolean;
+  ops_type?: string;
+  backup_info?: string;
   remark?: string;
   system_id?: number | null;
 }

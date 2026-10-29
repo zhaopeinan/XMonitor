@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS system_ledgers (
   domain_applied INTEGER NOT NULL DEFAULT 0,
   domain TEXT NOT NULL DEFAULT '',
   location TEXT NOT NULL DEFAULT '',
+  os_name TEXT NOT NULL DEFAULT '',
+  os_version TEXT NOT NULL DEFAULT '',
+  cpu_cores INTEGER,
+  memory_gb INTEGER,
+  disk_gb INTEGER,
+  sso_integrated INTEGER NOT NULL DEFAULT 0,
+  ops_type TEXT NOT NULL DEFAULT '',
+  backup_info TEXT NOT NULL DEFAULT '',
   remark TEXT NOT NULL DEFAULT '',
   system_id INTEGER REFERENCES systems(id) ON DELETE SET NULL,
   created_by INTEGER,
@@ -235,6 +243,15 @@ for (const sql of [
   "ALTER TABLE systems ADD COLUMN ops_unit TEXT NOT NULL DEFAULT ''",
   'ALTER TABLE systems ADD COLUMN created_by INTEGER',
   'ALTER TABLE system_ledgers ADD COLUMN created_by INTEGER',
+  // 台账扩展：操作系统、服务器配置、统一身份认证对接、运维类型、备份情况
+  "ALTER TABLE system_ledgers ADD COLUMN os_name TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE system_ledgers ADD COLUMN os_version TEXT NOT NULL DEFAULT ''",
+  'ALTER TABLE system_ledgers ADD COLUMN cpu_cores INTEGER',
+  'ALTER TABLE system_ledgers ADD COLUMN memory_gb INTEGER',
+  'ALTER TABLE system_ledgers ADD COLUMN disk_gb INTEGER',
+  'ALTER TABLE system_ledgers ADD COLUMN sso_integrated INTEGER NOT NULL DEFAULT 0',
+  "ALTER TABLE system_ledgers ADD COLUMN ops_type TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE system_ledgers ADD COLUMN backup_info TEXT NOT NULL DEFAULT ''",
 ]) {
   try {
     db.exec(sql);
@@ -243,7 +260,7 @@ for (const sql of [
   }
 }
 
-// 操作系统探测功能已下线：老库里把遗留的三列删掉（新库本来就没有，删不到会报错，忽略即可）
+// 旧「操作系统探测」遗留列（自动探测结论/依据/时间）已下线；人工登记改用 os_name / os_version
 for (const sql of [
   'ALTER TABLE system_ledgers DROP COLUMN os',
   'ALTER TABLE system_ledgers DROP COLUMN os_evidence',

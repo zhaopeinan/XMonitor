@@ -15,6 +15,15 @@ import type {
   SystemInfo,
 } from '../types';
 import {
+  OS_FAMILIES,
+  OPS_TYPE_OPTIONS,
+  osSummary,
+  opsTypeLabel,
+  serverSpecSummary,
+  versionsOf,
+  type OpsTypeValue,
+} from '../ledgerOs';
+import {
   certBadge,
   certDaysLeft,
   errMsg,
@@ -24,6 +33,15 @@ import {
   isInternalAddress,
   isTruthy,
 } from '../utils';
+
+function parseOptionalPositiveInt(raw: string, label: string): { ok: true; value: number | null } | { ok: false; error: string } {
+  const t = raw.trim();
+  if (!t) return { ok: true, value: null };
+  if (!/^\d+$/.test(t)) return { ok: false, error: `${label}须为正整数` };
+  const n = Number(t);
+  if (!Number.isInteger(n) || n <= 0) return { ok: false, error: `${label}须为正整数` };
+  return { ok: true, value: n };
+}
 
 const inputCls =
   'w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 placeholder-slate-400 outline-none transition focus:border-slate-500 focus:ring-2 focus:ring-slate-200';
@@ -244,6 +262,15 @@ interface FormState {
   domain_applied: boolean;
   domain: string;
   location: string;
+  os_name: string;
+  os_version: string;
+  /** 表单里用字符串承载，便于清空与校验 */
+  cpu_cores: string;
+  memory_gb: string;
+  disk_gb: string;
+  sso_integrated: boolean;
+  ops_type: OpsTypeValue;
+  backup_info: string;
   remark: string;
   system_id: string;
 }
@@ -256,11 +283,20 @@ const EMPTY_FORM: FormState = {
   domain_applied: false,
   domain: '',
   location: '',
+  os_name: '',
+  os_version: '',
+  cpu_cores: '',
+  memory_gb: '',
+  disk_gb: '',
+  sso_integrated: false,
+  ops_type: '',
+  backup_info: '',
   remark: '',
   system_id: '',
 };
 
 function formFromEntry(entry: LedgerEntry): FormState {
+  const opsType = (entry.ops_type ?? '') as OpsTypeValue;
   return {
     name: entry.name,
     ops_unit: entry.ops_unit ?? '',
@@ -269,6 +305,14 @@ function formFromEntry(entry: LedgerEntry): FormState {
     domain_applied: isTruthy(entry.domain_applied),
     domain: entry.domain ?? '',
     location: entry.location ?? '',
+    os_name: entry.os_name ?? '',
+    os_version: entry.os_version ?? '',
+    cpu_cores: entry.cpu_cores == null ? '' : String(entry.cpu_cores),
+    memory_gb: entry.memory_gb == null ? '' : String(entry.memory_gb),
+    disk_gb: entry.disk_gb == null ? '' : String(entry.disk_gb),
+    sso_integrated: isTruthy(entry.sso_integrated),
+    ops_type: opsType === 'long_term' || opsType === 'phased' ? opsType : '',
+    backup_info: entry.backup_info ?? '',
     remark: entry.remark ?? '',
     system_id: entry.system_id === null || entry.system_id === undefined ? '' : String(entry.system_id),
   };
@@ -369,7 +413,20 @@ export default function Ledger() {
         if (linkFilter === 'linked' ? !linked : linked) return false;
       }
       if (!q) return true;
-      return [e.name, e.ops_unit, e.ip, e.domain, e.location, e.remark, e.system_name ?? '']
+      return [
+        e.name,
+        e.ops_unit,
+        e.ip,
+        e.domain,
+        e.location,
+        e.os_name,
+        e.os_version,
+        serverSpecSummary(e),
+        opsTypeLabel(e.ops_type),
+        e.backup_info,
+        e.remark,
+        e.system_name ?? '',
+      ]
         .join(' ')
         .toLowerCase()
         .includes(q);
@@ -623,6 +680,21 @@ export default function Ledger() {
       setFormError('域名只填主机名，不要带 http:// 或 https:// 前缀');
       return;
     }
+    const cpu = parseOptionalPositiveInt(form.cpu_cores, 'CPU 核心数');
+    if (!cpu.ok) {
+      setFormError(cpu.error);
+      return;
+    }
+    const mem = parseOptionalPositiveInt(form.memory_gb, '内存');
+    if (!mem.ok) {
+      setFormError(mem.error);
+      return;
+    }
+    const disk = parseOptionalPositiveInt(form.disk_gb, '硬盘');
+    if (!disk.ok) {
+      setFormError(disk.error);
+      return;
+    }
     setSaving(true);
     setFormError(null);
     const payload = {
@@ -633,6 +705,14 @@ export default function Ledger() {
       domain_applied: form.domain_applied,
       domain: form.domain_applied ? form.domain.trim() : '',
       location: form.location.trim(),
+      os_name: form.os_name.trim(),
+      os_version: form.os_version.trim(),
+      cpu_cores: cpu.value,
+      memory_gb: mem.value,
+      disk_gb: disk.value,
+      sso_integrated: form.sso_integrated,
+      ops_type: form.ops_type,
+      backup_info: form.backup_info.trim(),
       remark: form.remark.trim(),
       system_id: form.system_id === '' ? null : Number(form.system_id),
     };
@@ -699,7 +779,7 @@ export default function Ledger() {
     <div className="mx-auto max-w-6xl">
       <PageHeader
         title="系统台账"
-        description="登记系统的运维单位、IP、外网开放与域名申请情况、物理机位置；可选关联到监控系统，资产信息与可用性监控各管一头。"
+        description="登记系统的运维单位、IP、操作系统与服务器配置、是否对接统一身份认证、运维类型、备份情况、外网开放与域名、物理机位置；可选关联到监控系统。"
         actions={
           canWrite ? (
             <button
@@ -858,7 +938,7 @@ export default function Ledger() {
         ) : (
           <div className="overflow-x-auto">
             {/* 列较多，给表格一个最小宽度：窄屏时横向滚动，避免列被压成逐字换行 */}
-            <table className="w-full min-w-[1360px] text-sm">
+            <table className="w-full min-w-[1680px] text-sm">
               <thead>
                 <tr className="whitespace-nowrap border-b border-slate-100 bg-slate-50/80 text-left text-xs text-slate-400">
                   {canWrite && (
@@ -875,6 +955,10 @@ export default function Ledger() {
                   <th className={`py-3 font-medium ${canWrite ? 'pl-2 pr-3' : 'px-5'}`}>系统名称</th>
                   <th className="px-3 py-3 font-medium">运维单位</th>
                   <th className="px-3 py-3 font-medium">IP</th>
+                  <th className="px-3 py-3 font-medium">操作系统</th>
+                  <th className="px-3 py-3 font-medium">服务器配置</th>
+                  <th className="px-3 py-3 font-medium">统一身份认证</th>
+                  <th className="px-3 py-3 font-medium">运维类型</th>
                   <th className="px-3 py-3 font-medium">外网访问</th>
                   <th className="px-3 py-3 font-medium">域名</th>
                   <th className="px-3 py-3 font-medium">HTTPS / 证书</th>
@@ -928,6 +1012,24 @@ export default function Ledger() {
                         ) : (
                           <span className="text-slate-300">—</span>
                         )}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3.5 text-slate-600">
+                        {osSummary(e) || <span className="text-slate-300">—</span>}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3.5 font-mono text-xs text-slate-600">
+                        {serverSpecSummary(e) || <span className="font-sans text-sm text-slate-300">—</span>}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3.5">
+                        {isTruthy(e.sso_integrated) ? (
+                          <span className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">
+                            已对接
+                          </span>
+                        ) : (
+                          <span className="text-slate-300">未对接</span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3.5 text-slate-600">
+                        {opsTypeLabel(e.ops_type) || <span className="text-slate-300">—</span>}
                       </td>
                       <td className="whitespace-nowrap px-3 py-3.5">
                         <ExternalBadge on={isTruthy(e.external_access)} />
@@ -1165,6 +1267,126 @@ export default function Ledger() {
               value={form.location}
               onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))}
               placeholder="例如 核心机房 A03 机柜 12U"
+            />
+          </Field>
+
+          {/* 操作系统：先选发行版，再选版本；「其他」可手填版本号 */}
+          <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field label="操作系统" hint="先选系统，再选版本">
+              <Select
+                value={form.os_name}
+                onChange={(v) =>
+                  setForm((f) => ({
+                    ...f,
+                    os_name: v,
+                    // 切换发行版时清掉旧版本，避免 CentOS 7 残留到 Ubuntu
+                    os_version: '',
+                  }))
+                }
+                ariaLabel="操作系统"
+                options={[
+                  { value: '', label: '未选择', divider: true },
+                  ...OS_FAMILIES.map((f) => ({ value: f.name, label: f.name })),
+                ]}
+              />
+            </Field>
+            <Field
+              label="系统版本"
+              hint={
+                form.os_name === '其他'
+                  ? '可自由填写版本号'
+                  : form.os_name
+                    ? '从该系统常见版本中选择'
+                    : '请先选择操作系统'
+              }
+            >
+              {form.os_name === '其他' || (form.os_name && versionsOf(form.os_name).length === 0) ? (
+                <input
+                  className={inputCls}
+                  value={form.os_version}
+                  onChange={(e) => setForm((f) => ({ ...f, os_version: e.target.value }))}
+                  placeholder="例如 自定义发行版版本号"
+                  disabled={!form.os_name}
+                />
+              ) : (
+                <Select
+                  value={form.os_version}
+                  onChange={(v) => setForm((f) => ({ ...f, os_version: v }))}
+                  ariaLabel="系统版本"
+                  disabled={!form.os_name}
+                  options={[
+                    { value: '', label: form.os_name ? '未选择' : '请先选操作系统', divider: true },
+                    ...versionsOf(form.os_name).map((ver) => ({ value: ver, label: ver })),
+                  ]}
+                />
+              )}
+            </Field>
+          </div>
+
+          <div className="mb-1">
+            <span className="mb-1.5 block text-sm font-medium text-slate-700">服务器配置</span>
+            <p className="mb-2 text-xs text-slate-400">CPU 核数、内存与硬盘容量；均可留空</p>
+          </div>
+          <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <Field label="CPU（核心）">
+              <input
+                className={inputCls}
+                inputMode="numeric"
+                value={form.cpu_cores}
+                onChange={(e) => setForm((f) => ({ ...f, cpu_cores: e.target.value.replace(/[^\d]/g, '') }))}
+                placeholder="例如 8"
+              />
+            </Field>
+            <Field label="内存（GB）">
+              <input
+                className={inputCls}
+                inputMode="numeric"
+                value={form.memory_gb}
+                onChange={(e) => setForm((f) => ({ ...f, memory_gb: e.target.value.replace(/[^\d]/g, '') }))}
+                placeholder="例如 16"
+              />
+            </Field>
+            <Field label="硬盘（GB）">
+              <input
+                className={inputCls}
+                inputMode="numeric"
+                value={form.disk_gb}
+                onChange={(e) => setForm((f) => ({ ...f, disk_gb: e.target.value.replace(/[^\d]/g, '') }))}
+                placeholder="例如 500"
+              />
+            </Field>
+          </div>
+
+          <div className="mb-4 flex flex-wrap gap-8">
+            <div>
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">是否对接统一身份认证</span>
+              <YesNo
+                value={form.sso_integrated}
+                onChange={(next) => setForm((f) => ({ ...f, sso_integrated: next }))}
+                yesLabel="是"
+                noLabel="否"
+              />
+            </div>
+          </div>
+
+          <Field label="运维类型">
+            <Select
+              value={form.ops_type}
+              onChange={(v) => setForm((f) => ({ ...f, ops_type: v as OpsTypeValue }))}
+              ariaLabel="运维类型"
+              options={[
+                { value: '', label: '未选择', divider: true },
+                ...OPS_TYPE_OPTIONS.map((o) => ({ value: o.value, label: o.label })),
+              ]}
+            />
+          </Field>
+
+          <Field label="备份情况" hint="备份策略、周期、存放位置等">
+            <textarea
+              className={`${inputCls} min-h-20 resize-y`}
+              value={form.backup_info}
+              onChange={(e) => setForm((f) => ({ ...f, backup_info: e.target.value }))}
+              placeholder="例如 每日增量 + 每周全量，备份至灾备机房"
             />
           </Field>
 

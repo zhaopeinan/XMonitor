@@ -37,6 +37,22 @@ export interface SystemLedgerRow {
   domain_applied: number;
   domain: string;
   location: string;
+  /** 操作系统发行版/产品名，例如 CentOS、Windows Server */
+  os_name: string;
+  /** 操作系统版本号，例如 7.9、2022 */
+  os_version: string;
+  /** CPU 核心数；未填为空 */
+  cpu_cores: number | null;
+  /** 内存（GB）；未填为空 */
+  memory_gb: number | null;
+  /** 硬盘（GB）；未填为空 */
+  disk_gb: number | null;
+  /** 是否对接统一身份认证：1=是，0=否 */
+  sso_integrated: number;
+  /** 运维类型：long_term=长期运维，phased=阶段性运维，空=未填 */
+  ops_type: string;
+  /** 备份情况说明 */
+  backup_info: string;
   remark: string;
   system_id: number | null;
   /** 创建人用户 id（历史数据为空）；数据权限「仅本人创建」按它过滤 */

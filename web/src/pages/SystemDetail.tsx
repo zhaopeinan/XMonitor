@@ -588,6 +588,40 @@ export default function SystemDetail() {
                     <p className="mt-0.5 break-all font-mono text-sm text-slate-700">{e.ip || '—'}</p>
                   </div>
                   <div>
+                    <p className="text-[11px] text-slate-400">操作系统</p>
+                    <p className="mt-0.5 text-sm text-slate-700">
+                      {[e.os_name, e.os_version].filter(Boolean).join(' ') || '—'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] text-slate-400">服务器配置</p>
+                    <p className="mt-0.5 font-mono text-sm text-slate-700">
+                      {[
+                        e.cpu_cores != null ? `${e.cpu_cores}C` : '',
+                        e.memory_gb != null ? `${e.memory_gb}G` : '',
+                        e.disk_gb != null ? `${e.disk_gb}G` : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' / ') || '—'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] text-slate-400">统一身份认证</p>
+                    <p className="mt-0.5 text-sm text-slate-700">
+                      {isTruthy(e.sso_integrated) ? '已对接' : '未对接'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] text-slate-400">运维类型</p>
+                    <p className="mt-0.5 text-sm text-slate-700">
+                      {e.ops_type === 'long_term'
+                        ? '长期运维'
+                        : e.ops_type === 'phased'
+                          ? '阶段性运维'
+                          : '—'}
+                    </p>
+                  </div>
+                  <div>
                     <p className="text-[11px] text-slate-400">外网访问</p>
                     <p className="mt-0.5 text-sm text-slate-700">
                       {isTruthy(e.external_access) ? (
@@ -608,6 +642,12 @@ export default function SystemDetail() {
                     <p className="mt-0.5 text-sm text-slate-700">{e.location || '—'}</p>
                   </div>
                 </div>
+                {e.backup_info && (
+                  <p className="mt-2.5 whitespace-pre-wrap border-t border-slate-200/70 pt-2.5 text-xs text-slate-500">
+                    <span className="font-medium text-slate-600">备份：</span>
+                    {e.backup_info}
+                  </p>
+                )}
                 {e.remark && (
                   <p className="mt-2.5 whitespace-pre-wrap border-t border-slate-200/70 pt-2.5 text-xs text-slate-500">
                     {e.remark}
