@@ -16,6 +16,7 @@ import type {
   SystemMetricsPayload,
   SystemSummary,
 } from '../types';
+import { securityDomainLabel } from '../ledgerOs';
 import {
   alertKindMeta,
   errMsg,
@@ -586,6 +587,16 @@ export default function SystemDetail() {
                   <div>
                     <p className="text-[11px] text-slate-400">IP</p>
                     <p className="mt-0.5 break-all font-mono text-sm text-slate-700">{e.ip || '—'}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] text-slate-400">开放端口</p>
+                    <p className="mt-0.5 break-all font-mono text-sm text-slate-700">{e.open_ports || '—'}</p>
+                  </div>
+                  <div>
+                    <p className="text-[11px] text-slate-400">安全域</p>
+                    <p className="mt-0.5 text-sm text-slate-700">
+                      {securityDomainLabel(e.security_domain) || '—'}
+                    </p>
                   </div>
                   <div>
                     <p className="text-[11px] text-slate-400">操作系统</p>

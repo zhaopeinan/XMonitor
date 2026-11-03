@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS system_ledgers (
   sso_integrated INTEGER NOT NULL DEFAULT 0,
   ops_type TEXT NOT NULL DEFAULT '',
   backup_info TEXT NOT NULL DEFAULT '',
+  open_ports TEXT NOT NULL DEFAULT '',
+  security_domain TEXT NOT NULL DEFAULT '',
   remark TEXT NOT NULL DEFAULT '',
   system_id INTEGER REFERENCES systems(id) ON DELETE SET NULL,
   created_by INTEGER,
@@ -252,6 +254,9 @@ for (const sql of [
   'ALTER TABLE system_ledgers ADD COLUMN sso_integrated INTEGER NOT NULL DEFAULT 0',
   "ALTER TABLE system_ledgers ADD COLUMN ops_type TEXT NOT NULL DEFAULT ''",
   "ALTER TABLE system_ledgers ADD COLUMN backup_info TEXT NOT NULL DEFAULT ''",
+  // 台账扩展：开放端口（多值逗号分隔）、安全域（单选枚举）
+  "ALTER TABLE system_ledgers ADD COLUMN open_ports TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE system_ledgers ADD COLUMN security_domain TEXT NOT NULL DEFAULT ''",
 ]) {
   try {
     db.exec(sql);

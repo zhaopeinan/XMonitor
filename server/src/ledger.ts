@@ -54,6 +54,36 @@ function normalizeIp(raw: unknown): Validated<string> {
   return { ok: true, value: tokens.join(', ') };
 }
 
+/** 开放端口：1–65535 整数，多个用逗号、空格或分号分隔；去重并按数值升序 */
+function normalizePorts(raw: unknown): Validated<string> {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return { ok: true, value: '' };
+  const tokens = text.split(/[\s,，;；、]+/).filter(Boolean);
+  const bad: string[] = [];
+  const ports: number[] = [];
+  const seen = new Set<number>();
+  for (const token of tokens) {
+    if (!/^\d+$/.test(token)) {
+      bad.push(token);
+      continue;
+    }
+    const n = Number(token);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      bad.push(token);
+      continue;
+    }
+    if (!seen.has(n)) {
+      seen.add(n);
+      ports.push(n);
+    }
+  }
+  if (bad.length > 0) {
+    return { ok: false, error: `开放端口不正确：${bad.join('、')}（须为 1–65535 的整数，多个用逗号或空格分隔）` };
+  }
+  ports.sort((a, b) => a - b);
+  return { ok: true, value: ports.join(', ') };
+}
+
 const DOMAIN_LABEL = '[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?';
 const DOMAIN_RE = new RegExp(`^${DOMAIN_LABEL}(\\.${DOMAIN_LABEL})+$`);
 
@@ -92,6 +122,17 @@ function normalizeBool(raw: unknown): boolean {
 
 const OPS_TYPES = new Set(['', 'long_term', 'phased']);
 
+const SECURITY_DOMAINS = new Set([
+  '',
+  'data_mid_1',
+  'data_mid_2',
+  'sensitive_data',
+  'general_app',
+  'phy_oob',
+  'external_ops',
+  'server_oob',
+]);
+
 /** 正整数容量字段（CPU 核数 / 内存 GB / 硬盘 GB）；空串与 null 表示未填 */
 function normalizePositiveInt(raw: unknown, label: string): Validated<number | null> {
   if (raw === undefined || raw === null || raw === '') return { ok: true, value: null };
@@ -119,6 +160,8 @@ interface EntryInput {
   sso_integrated: number;
   ops_type: string;
   backup_info: string;
+  open_ports: string;
+  security_domain: string;
   remark: string;
   system_id: number | null;
 }
@@ -200,6 +243,19 @@ function readEntryInput(body: unknown, existing?: SystemLedgerRow): Validated<En
     return { ok: false, error: '运维类型只能是「长期运维」或「阶段性运维」' };
   }
 
+  const portsResult = normalizePorts(
+    b.open_ports === undefined && existing ? existing.open_ports : b.open_ports,
+  );
+  if (!portsResult.ok) return portsResult;
+
+  const securityDomainRaw =
+    b.security_domain === undefined && existing
+      ? existing.security_domain
+      : normalizeText(b.security_domain, 40);
+  if (!SECURITY_DOMAINS.has(securityDomainRaw)) {
+    return { ok: false, error: '安全域不在可选范围内' };
+  }
+
   return {
     ok: true,
     value: {
@@ -218,6 +274,8 @@ function readEntryInput(body: unknown, existing?: SystemLedgerRow): Validated<En
       sso_integrated: ssoIntegrated,
       ops_type: opsTypeRaw,
       backup_info: b.backup_info === undefined && existing ? existing.backup_info : normalizeText(b.backup_info, 2000),
+      open_ports: portsResult.value,
+      security_domain: securityDomainRaw,
       remark: b.remark === undefined && existing ? existing.remark : normalizeText(b.remark, 2000),
       system_id: systemId,
     },
@@ -265,8 +323,9 @@ ledgerRouter.post('/ledger', requirePermission('ledger.manage'), (req, res) => {
       `INSERT INTO system_ledgers(
          name, ops_unit, ip, external_access, domain_applied, domain, location,
          os_name, os_version, cpu_cores, memory_gb, disk_gb, sso_integrated, ops_type, backup_info,
+         open_ports, security_domain,
          remark, system_id, created_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       v.name,
@@ -284,6 +343,8 @@ ledgerRouter.post('/ledger', requirePermission('ledger.manage'), (req, res) => {
       v.sso_integrated,
       v.ops_type,
       v.backup_info,
+      v.open_ports,
+      v.security_domain,
       v.remark,
       v.system_id,
       req.user!.id,
@@ -306,6 +367,7 @@ ledgerRouter.patch('/ledger/:id', requirePermission('ledger.manage'), (req, res)
      SET name = ?, ops_unit = ?, ip = ?, external_access = ?, domain_applied = ?, domain = ?, location = ?,
          os_name = ?, os_version = ?, cpu_cores = ?, memory_gb = ?, disk_gb = ?,
          sso_integrated = ?, ops_type = ?, backup_info = ?,
+         open_ports = ?, security_domain = ?,
          remark = ?, system_id = ?, updated_at = ?
      WHERE id = ?`,
   ).run(
@@ -324,6 +386,8 @@ ledgerRouter.patch('/ledger/:id', requirePermission('ledger.manage'), (req, res)
     v.sso_integrated,
     v.ops_type,
     v.backup_info,
+    v.open_ports,
+    v.security_domain,
     v.remark,
     v.system_id,
     Date.now(),

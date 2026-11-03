@@ -53,6 +53,10 @@ export interface SystemLedgerRow {
   ops_type: string;
   /** 备份情况说明 */
   backup_info: string;
+  /** 开放端口：多个用逗号分隔，例如 22, 80, 443 */
+  open_ports: string;
+  /** 安全域枚举值；空=未填 */
+  security_domain: string;
   remark: string;
   system_id: number | null;
   /** 创建人用户 id（历史数据为空）；数据权限「仅本人创建」按它过滤 */

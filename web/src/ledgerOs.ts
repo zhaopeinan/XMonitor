@@ -94,6 +94,28 @@ export function opsTypeLabel(value: string | null | undefined): string {
   return OPS_TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value;
 }
 
+/** 安全域（单选）；VLAN 仅作展示参考，710 对应两个不同域 */
+export const SECURITY_DOMAIN_OPTIONS = [
+  { value: 'data_mid_1', label: '数据中台安全域-1', vlan: 630 },
+  { value: 'data_mid_2', label: '数据中台安全域-2', vlan: 635 },
+  { value: 'sensitive_data', label: '敏感数据系统安全域', vlan: 610 },
+  { value: 'general_app', label: '普通应用安全域', vlan: 615 },
+  { value: 'phy_oob', label: '物理机带外管理', vlan: 710 },
+  { value: 'external_ops', label: '外部运维安全域', vlan: 620 },
+  { value: 'server_oob', label: '服务器带外管理域', vlan: 710 },
+] as const;
+
+export type SecurityDomainValue = (typeof SECURITY_DOMAIN_OPTIONS)[number]['value'] | '';
+
+export function securityDomainLabel(value: string | null | undefined): string {
+  if (!value) return '';
+  return SECURITY_DOMAIN_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+export function securityDomainOptionLabel(opt: (typeof SECURITY_DOMAIN_OPTIONS)[number]): string {
+  return `${opt.label}（VLAN ${opt.vlan}）`;
+}
+
 /** 列表里一行展示的服务器配置摘要，例如 8C / 16G / 500G */
 export function serverSpecSummary(entry: {
   cpu_cores?: number | null;

@@ -17,11 +17,15 @@ import type {
 import {
   OS_FAMILIES,
   OPS_TYPE_OPTIONS,
+  SECURITY_DOMAIN_OPTIONS,
   osSummary,
   opsTypeLabel,
+  securityDomainLabel,
+  securityDomainOptionLabel,
   serverSpecSummary,
   versionsOf,
   type OpsTypeValue,
+  type SecurityDomainValue,
 } from '../ledgerOs';
 import {
   certBadge,
@@ -271,6 +275,8 @@ interface FormState {
   sso_integrated: boolean;
   ops_type: OpsTypeValue;
   backup_info: string;
+  open_ports: string;
+  security_domain: SecurityDomainValue;
   remark: string;
   system_id: string;
 }
@@ -291,12 +297,17 @@ const EMPTY_FORM: FormState = {
   sso_integrated: false,
   ops_type: '',
   backup_info: '',
+  open_ports: '',
+  security_domain: '',
   remark: '',
   system_id: '',
 };
 
+const SECURITY_DOMAIN_VALUES = new Set<string>(SECURITY_DOMAIN_OPTIONS.map((o) => o.value));
+
 function formFromEntry(entry: LedgerEntry): FormState {
   const opsType = (entry.ops_type ?? '') as OpsTypeValue;
+  const securityDomain = (entry.security_domain ?? '') as SecurityDomainValue;
   return {
     name: entry.name,
     ops_unit: entry.ops_unit ?? '',
@@ -313,6 +324,8 @@ function formFromEntry(entry: LedgerEntry): FormState {
     sso_integrated: isTruthy(entry.sso_integrated),
     ops_type: opsType === 'long_term' || opsType === 'phased' ? opsType : '',
     backup_info: entry.backup_info ?? '',
+    open_ports: entry.open_ports ?? '',
+    security_domain: SECURITY_DOMAIN_VALUES.has(securityDomain) ? securityDomain : '',
     remark: entry.remark ?? '',
     system_id: entry.system_id === null || entry.system_id === undefined ? '' : String(entry.system_id),
   };
@@ -417,6 +430,8 @@ export default function Ledger() {
         e.name,
         e.ops_unit,
         e.ip,
+        e.open_ports,
+        securityDomainLabel(e.security_domain),
         e.domain,
         e.location,
         e.os_name,
@@ -713,6 +728,8 @@ export default function Ledger() {
       sso_integrated: form.sso_integrated,
       ops_type: form.ops_type,
       backup_info: form.backup_info.trim(),
+      open_ports: form.open_ports.trim(),
+      security_domain: form.security_domain,
       remark: form.remark.trim(),
       system_id: form.system_id === '' ? null : Number(form.system_id),
     };
@@ -955,6 +972,8 @@ export default function Ledger() {
                   <th className={`py-3 font-medium ${canWrite ? 'pl-2 pr-3' : 'px-5'}`}>系统名称</th>
                   <th className="px-3 py-3 font-medium">运维单位</th>
                   <th className="px-3 py-3 font-medium">IP</th>
+                  <th className="px-3 py-3 font-medium">开放端口</th>
+                  <th className="px-3 py-3 font-medium">安全域</th>
                   <th className="px-3 py-3 font-medium">操作系统</th>
                   <th className="px-3 py-3 font-medium">服务器配置</th>
                   <th className="px-3 py-3 font-medium">统一身份认证</th>
@@ -1012,6 +1031,16 @@ export default function Ledger() {
                         ) : (
                           <span className="text-slate-300">—</span>
                         )}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3.5">
+                        {e.open_ports ? (
+                          <span className="font-mono text-xs text-slate-600">{e.open_ports}</span>
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3.5 text-slate-600">
+                        {securityDomainLabel(e.security_domain) || <span className="text-slate-300">—</span>}
                       </td>
                       <td className="whitespace-nowrap px-3 py-3.5 text-slate-600">
                         {osSummary(e) || <span className="text-slate-300">—</span>}
@@ -1205,6 +1234,30 @@ export default function Ledger() {
                 )}
               </div>
             )}
+          </Field>
+
+          <Field label="开放端口" hint="多个用逗号或空格分隔，例如 22, 80, 443；须为 1–65535">
+            <input
+              className={`${inputCls} font-mono`}
+              value={form.open_ports}
+              onChange={(e) => setForm((f) => ({ ...f, open_ports: e.target.value }))}
+              placeholder="22, 80, 443"
+            />
+          </Field>
+
+          <Field label="安全域" hint="单选；括号内为对应 VLAN，其中 VLAN 710 有两个域可选">
+            <Select
+              value={form.security_domain}
+              onChange={(v) => setForm((f) => ({ ...f, security_domain: v as SecurityDomainValue }))}
+              ariaLabel="安全域"
+              options={[
+                { value: '', label: '未选择', divider: true },
+                ...SECURITY_DOMAIN_OPTIONS.map((o) => ({
+                  value: o.value,
+                  label: securityDomainOptionLabel(o),
+                })),
+              ]}
+            />
           </Field>
 
           <div className="mb-4 flex flex-wrap gap-8">

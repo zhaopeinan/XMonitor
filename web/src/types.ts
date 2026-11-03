@@ -75,6 +75,10 @@ export interface LedgerEntry {
   ops_type: string;
   /** 备份情况 */
   backup_info: string;
+  /** 开放端口：多个用逗号分隔 */
+  open_ports: string;
+  /** 安全域枚举值；空=未填 */
+  security_domain: string;
   remark: string;
   system_id: number | null;
   system_name: string | null;
@@ -99,6 +103,8 @@ export interface LedgerEntryInput {
   sso_integrated?: boolean;
   ops_type?: string;
   backup_info?: string;
+  open_ports?: string;
+  security_domain?: string;
   remark?: string;
   system_id?: number | null;
 }
